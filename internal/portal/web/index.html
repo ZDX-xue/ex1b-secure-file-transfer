@@ -23,7 +23,8 @@
     </div>
     <div class="auth-side">
       <div class="auth-card">
-        <div class="segmented auth-toggle" aria-label="选择登录或者注册">
+        <p id="auth-entry" class="entry-name" hidden></p>
+        <div id="auth-toggle" class="segmented auth-toggle" aria-label="选择登录或者注册">
           <button id="choose-login" type="button" aria-pressed="true">登录</button>
           <button id="choose-register" type="button" aria-pressed="false">注册</button>
         </div>
@@ -46,6 +47,10 @@
           </fieldset>
           <button class="primary" type="submit">创建账号</button>
         </form>
+        <nav id="entry-switcher" class="entry-switcher" aria-label="切换登录入口" hidden>
+          <h3>分开登录</h3>
+          <div id="entry-links" class="entry-links"></div>
+        </nav>
       </div>
     </div>
   </main>
@@ -61,6 +66,10 @@
         <button type="button" data-route="audit" data-scope="admin"><span aria-hidden="true">≔</span>操作记录</button>
         <button type="button" data-route="settings"><span aria-hidden="true">⚙</span>账号设置</button>
       </nav>
+      <details id="workspace-entry-switcher" class="sidebar-entry-switcher" hidden>
+        <summary>分开登录</summary>
+        <div id="workspace-entry-links" class="entry-links"></div>
+      </details>
       <div class="side-foot">
         <div class="identity"><span class="avatar" id="side-avatar" aria-hidden="true"></span><div><b id="side-user"></b><small id="side-role"></small></div></div>
         <button id="logout" class="logout" type="button">退出登录</button>

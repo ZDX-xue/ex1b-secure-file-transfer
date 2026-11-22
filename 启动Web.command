@@ -11,7 +11,8 @@ if [[ "$(uname -m)" != arm64 || ! -x "$binary" ]]; then
   binary=bin/ex1b-web-mac-local
   go build -trimpath -o "$binary" ./cmd/ex1b
 fi
-"$binary" web --listen 127.0.0.1:44080 --origin http://127.0.0.1:44080 --data web-data &
+"$binary" web --listen 127.0.0.1:44080 --origin http://127.0.0.1:44080 \
+  --admin-port 44081 --user-ports 44082,44083,44084 --data web-data &
 pid=$!
 trap 'kill -TERM "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 trap 'exit 0' INT TERM

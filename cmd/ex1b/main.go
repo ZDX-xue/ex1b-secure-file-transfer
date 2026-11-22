@@ -37,13 +37,19 @@ func run(ctx context.Context, args []string) error {
 		var web webapp.Options
 		options.StringVar(&web.Listen, "listen", "127.0.0.1:4443", "Web 监听地址")
 		options.StringVar(&web.Origin, "origin", "https://localhost:4443", "浏览器访问地址，亦用于证书和同源校验")
+		options.IntVar(&web.AdminPort, "admin-port", 0, "独立管理员入口端口，0 表示关闭")
+		options.StringVar(&web.UserPorts, "user-ports", "", "逗号分隔的独立用户入口端口")
 		options.StringVar(&web.Data, "data", "web-data", "Web 账号、文件与 PKI 数据目录")
 		options.StringVar(&web.AdminPasswordFile, "admin-password-file", "", "首次初始化管理员密码的文件")
 		if err := options.Parse(args[1:]); err != nil {
 			return err
 		}
-		web.Ready = func(origin, caFile, passFile string) {
-			fmt.Printf("EX1B Web  %s\n实验 CA  %s\n首次管理员 admin 的密码文件  %s\n", origin, caFile, passFile)
+		web.Ready = func(origins []string, caFile, passFile string) {
+			fmt.Printf("EX1B Web  %s\n", origins[0])
+			for _, origin := range origins[1:] {
+				fmt.Printf("独立登录入口  %s\n", origin)
+			}
+			fmt.Printf("实验 CA  %s\n首次管理员 admin 的密码文件  %s\n", caFile, passFile)
 		}
 		return webapp.Run(ctx, web)
 	case "init":

@@ -19,10 +19,22 @@ import (
 	"ex1b/internal/webauth"
 )
 
-const sessionCookie = "ex1b_web_session"
 const sessionLife = 8 * time.Hour
 
-func (g *gateway) routes() http.Handler {
+func (entry portalEntry) accepts(role string) bool {
+	switch entry.role {
+	case "main":
+		return role == "admin" || role == "normal" || role == "vip"
+	case "admin":
+		return role == "admin"
+	case "user":
+		return role == "normal" || role == "vip"
+	default:
+		return false
+	}
+}
+
+func (g *gateway) routes(entry portalEntry, entries []portalEntry) http.Handler {
 	mux := http.NewServeMux()
 	for pattern, asset := range map[string]struct{ path, mime string }{
 		"GET /{$}":       {"web/index.html", "text/html; charset=utf-8"},
@@ -40,38 +52,67 @@ func (g *gateway) routes() http.Handler {
 		})
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { respond(w, http.StatusOK, map[string]bool{"ok": true}) })
-	mux.HandleFunc("POST /api/auth/register", g.register)
-	mux.HandleFunc("POST /api/auth/login", g.login)
-	mux.HandleFunc("GET /api/auth/me", g.authorize("", func(w http.ResponseWriter, r *http.Request, s *browserSession) {
+	type entryLink struct {
+		Role   string `json:"role"`
+		Name   string `json:"name"`
+		Origin string `json:"origin"`
+	}
+	links := make([]entryLink, 0, len(entries))
+	for _, link := range entries {
+		links = append(links, entryLink{Role: link.role, Name: link.name, Origin: link.origin})
+	}
+	mux.HandleFunc("GET /api/entry", func(w http.ResponseWriter, r *http.Request) {
+		respond(w, http.StatusOK, struct {
+			Role    string      `json:"role"`
+			Name    string      `json:"name"`
+			Entries []entryLink `json:"entries"`
+		}{Role: entry.role, Name: entry.name, Entries: links})
+	})
+	mux.HandleFunc("POST /api/auth/register", func(w http.ResponseWriter, r *http.Request) {
+		if !entry.accepts("normal") {
+			fail(w, http.StatusForbidden, "请在用户入口注册")
+			return
+		}
+		g.register(w, r)
+	})
+	mux.HandleFunc("POST /api/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		g.login(w, r, entry)
+	})
+	requireSession := func(access string, next func(http.ResponseWriter, *http.Request, *browserSession)) http.HandlerFunc {
+		return g.authorize(entry, access, next)
+	}
+	mux.HandleFunc("GET /api/auth/me", requireSession("", func(w http.ResponseWriter, r *http.Request, s *browserSession) {
 		g.sessionResponse(w, s)
 	}))
-	mux.HandleFunc("POST /api/auth/logout", g.authorize("", func(w http.ResponseWriter, r *http.Request, s *browserSession) {
-		if c, err := r.Cookie(sessionCookie); err == nil {
-			g.removeSession(c.Value)
+	mux.HandleFunc("POST /api/auth/logout", requireSession("", func(w http.ResponseWriter, r *http.Request, s *browserSession) {
+		if c, err := r.Cookie(entry.cookie); err == nil {
+			g.removeSession(c.Value, entry.host)
 		}
-		g.cookie(w, "", -1)
+		entry.writeCookie(w, "", -1)
 		success(w)
 	}))
-	mux.HandleFunc("POST /api/auth/password", g.authorize("", g.changePassword))
+	mux.HandleFunc("POST /api/auth/password", requireSession("", func(w http.ResponseWriter, r *http.Request, s *browserSession) {
+		g.changePassword(w, r, s, entry)
+	}))
 	for _, route := range []string{
 		"GET /api/state", "GET /api/files/{id}", "POST /api/upload", "POST /api/download", "POST /api/reconnect",
 		"POST /api/tasks/{id}/pause", "POST /api/tasks/{id}/resume",
 	} {
-		mux.HandleFunc(route, g.authorize("user", func(w http.ResponseWriter, r *http.Request, s *browserSession) {
+		mux.HandleFunc(route, requireSession("user", func(w http.ResponseWriter, r *http.Request, s *browserSession) {
 			s.workspace.ServeHTTP(w, r)
 		}))
 	}
-	mux.HandleFunc("GET /api/people", g.authorize("user", g.people))
-	mux.HandleFunc("POST /api/share", g.authorize("user", g.share))
-	mux.HandleFunc("GET /api/inbox", g.authorize("user", g.messages(false)))
-	mux.HandleFunc("GET /api/outbox", g.authorize("user", g.messages(true)))
-	mux.HandleFunc("GET /api/admin/state", g.authorize("admin", func(w http.ResponseWriter, r *http.Request, s *browserSession) {
+	mux.HandleFunc("GET /api/people", requireSession("user", g.people))
+	mux.HandleFunc("POST /api/share", requireSession("user", g.share))
+	mux.HandleFunc("GET /api/inbox", requireSession("user", g.messages(false)))
+	mux.HandleFunc("GET /api/outbox", requireSession("user", g.messages(true)))
+	mux.HandleFunc("GET /api/admin/state", requireSession("admin", func(w http.ResponseWriter, r *http.Request, s *browserSession) {
 		respond(w, http.StatusOK, struct {
 			Accounts []webauth.User `json:"accounts"`
 			service.Snapshot
 		}{g.registry.List(), g.service.Snapshot()})
 	}))
-	mux.HandleFunc("POST /api/admin/admission", g.authorize("admin", func(w http.ResponseWriter, r *http.Request, s *browserSession) {
+	mux.HandleFunc("POST /api/admin/admission", requireSession("admin", func(w http.ResponseWriter, r *http.Request, s *browserSession) {
 		var request struct {
 			Accepting *bool `json:"accepting"`
 		}
@@ -85,15 +126,15 @@ func (g *gateway) routes() http.Handler {
 		g.service.SetAccepting(*request.Accepting)
 		success(w)
 	}))
-	mux.HandleFunc("POST /api/admin/users/{username}/state", g.authorize("admin", g.userState))
-	mux.HandleFunc("POST /api/admin/users/{username}/password", g.authorize("admin", g.resetUserPassword))
-	mux.HandleFunc("POST /api/admin/users/{username}/delete", g.authorize("admin", g.deleteUser))
+	mux.HandleFunc("POST /api/admin/users/{username}/state", requireSession("admin", g.userState))
+	mux.HandleFunc("POST /api/admin/users/{username}/password", requireSession("admin", g.resetUserPassword))
+	mux.HandleFunc("POST /api/admin/users/{username}/delete", requireSession("admin", g.deleteUser))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		if r.Host != g.host || (r.Method == http.MethodPost && r.Header.Get("Origin") != g.origin) {
+		if r.Host != entry.host || (r.Method == http.MethodPost && r.Header.Get("Origin") != entry.origin) {
 			fail(w, http.StatusForbidden, "页面地址或操作来源不匹配")
 			return
 		}
@@ -101,9 +142,9 @@ func (g *gateway) routes() http.Handler {
 	})
 }
 
-func (g *gateway) authorize(access string, next func(http.ResponseWriter, *http.Request, *browserSession)) http.HandlerFunc {
+func (g *gateway) authorize(entry portalEntry, access string, next func(http.ResponseWriter, *http.Request, *browserSession)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token, err := r.Cookie(sessionCookie)
+		token, err := r.Cookie(entry.cookie)
 		if err != nil {
 			fail(w, http.StatusUnauthorized, "请先登录")
 			return
@@ -111,17 +152,17 @@ func (g *gateway) authorize(access string, next func(http.ResponseWriter, *http.
 		g.mu.Lock()
 		s := g.sessions[token.Value]
 		g.mu.Unlock()
-		if s == nil || time.Now().After(s.expiry) {
+		if s == nil || s.portalHost != entry.host || time.Now().After(s.expiry) {
 			fail(w, http.StatusUnauthorized, "登录已过期，请重新登录")
 			return
 		}
 		user, ok := g.registry.Lookup(s.user.Username)
 		if !ok || !user.Enabled {
-			g.removeSession(token.Value)
+			g.removeSession(token.Value, entry.host)
 			fail(w, http.StatusUnauthorized, "账号已停用或会话已失效")
 			return
 		}
-		if access == "admin" && user.Role != "admin" || access == "user" && user.Role == "admin" {
+		if !entry.accepts(user.Role) || access == "admin" && user.Role != "admin" || access == "user" && user.Role == "admin" {
 			fail(w, http.StatusForbidden, "该账号无此操作权限")
 			return
 		}
@@ -180,7 +221,7 @@ func (g *gateway) register(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusCreated, user)
 }
 
-func (g *gateway) login(w http.ResponseWriter, r *http.Request) {
+func (g *gateway) login(w http.ResponseWriter, r *http.Request, entry portalEntry) {
 	var in struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -200,12 +241,20 @@ func (g *gateway) login(w http.ResponseWriter, r *http.Request) {
 		authFailure(w, err)
 		return
 	}
-	g.signIn(w, r, user)
+	if !entry.accepts(user.Role) {
+		message := "请从管理员入口登录"
+		if entry.role == "admin" {
+			message = "管理员入口只接受管理员账号"
+		}
+		fail(w, http.StatusForbidden, message)
+		return
+	}
+	g.signIn(w, r, user, entry)
 }
 
-func (g *gateway) signIn(w http.ResponseWriter, r *http.Request, user webauth.User) {
+func (g *gateway) signIn(w http.ResponseWriter, r *http.Request, user webauth.User, entry portalEntry) {
 	ctx, cancel := context.WithCancel(g.ctx)
-	s := &browserSession{user: user, csrf: randomToken(24), expiry: time.Now().Add(sessionLife), cancel: cancel}
+	s := &browserSession{user: user, portalHost: entry.host, csrf: randomToken(24), expiry: time.Now().Add(sessionLife), cancel: cancel}
 	if user.Role != "admin" {
 		key := filepath.Join(g.data, "pki", "user-"+user.Username+".pem")
 		engine, err := transfer.New(ctx, identity.ClientConfig{
@@ -243,10 +292,10 @@ func (g *gateway) signIn(w http.ResponseWriter, r *http.Request, user webauth.Us
 	g.sessions[key] = s
 	g.mu.Unlock()
 	retire(previous)
-	if before, err := r.Cookie(sessionCookie); err == nil {
-		g.removeSession(before.Value)
+	if before, err := r.Cookie(entry.cookie); err == nil {
+		g.removeSession(before.Value, entry.host)
 	}
-	g.cookie(w, key, int(sessionLife.Seconds()))
+	entry.writeCookie(w, key, int(sessionLife.Seconds()))
 	g.sessionResponse(w, s)
 }
 
@@ -257,10 +306,10 @@ func (g *gateway) sessionResponse(w http.ResponseWriter, s *browserSession) {
 	}{s.user, s.csrf})
 }
 
-func (g *gateway) cookie(w http.ResponseWriter, value string, age int) {
+func (entry portalEntry) writeCookie(w http.ResponseWriter, value string, age int) {
 	http.SetCookie(w, &http.Cookie{
-		Name: sessionCookie, Value: value, Path: "/", HttpOnly: true,
-		Secure: g.secure, SameSite: http.SameSiteStrictMode, MaxAge: age,
+		Name: entry.cookie, Value: value, Path: "/", HttpOnly: true,
+		Secure: entry.secure, SameSite: http.SameSiteStrictMode, MaxAge: age,
 	})
 }
 
@@ -277,9 +326,13 @@ func retire(s *browserSession) {
 	}
 }
 
-func (g *gateway) removeSession(key string) {
+func (g *gateway) removeSession(key string, portalHost string) {
 	g.mu.Lock()
 	s := g.sessions[key]
+	if s == nil || s.portalHost != portalHost {
+		g.mu.Unlock()
+		return
+	}
 	delete(g.sessions, key)
 	g.mu.Unlock()
 	retire(s)
@@ -324,7 +377,7 @@ func (g *gateway) expireSessions() {
 	}
 }
 
-func (g *gateway) changePassword(w http.ResponseWriter, r *http.Request, s *browserSession) {
+func (g *gateway) changePassword(w http.ResponseWriter, r *http.Request, s *browserSession, entry portalEntry) {
 	var in struct {
 		Current string `json:"current"`
 		New     string `json:"new_password"`
@@ -339,7 +392,7 @@ func (g *gateway) changePassword(w http.ResponseWriter, r *http.Request, s *brow
 		return
 	}
 	g.revoke(s.user.Username)
-	g.cookie(w, "", -1)
+	entry.writeCookie(w, "", -1)
 	success(w)
 }
 

@@ -45,6 +45,7 @@ let staging = 0;
 let uploads = [];
 let managedAccount = null;
 let accountActionTrigger = null;
+let entry = {role: "main", name: ""};
 
 function node(tag, text, className) {
   const element = document.createElement(tag);
@@ -111,14 +112,75 @@ function post(path, data = {}) {
   return request(path, {method: "POST", data});
 }
 
+function showAuthHeading() {
+  const wantsRegister = !$("register-form").hidden;
+  const isAdmin = entry.role === "admin";
+  $("auth-title").textContent = wantsRegister ? "创建账号" : (isAdmin ? "管理员登录" : "登录工作台");
+  $("auth-subtitle").textContent = wantsRegister
+    ? "注册普通用户或 VIP 账号，获得独立的文件空间。"
+    : (isAdmin ? "请使用管理员账号进入服务监控和账号管理。" : "使用账号进入你的文件与传输空间。");
+}
+
 function authMode(wantsRegister) {
+  wantsRegister = wantsRegister && entry.role !== "admin";
   $("choose-login").setAttribute("aria-pressed", String(!wantsRegister));
   $("choose-register").setAttribute("aria-pressed", String(wantsRegister));
   $("login-form").hidden = wantsRegister;
   $("register-form").hidden = !wantsRegister;
-  $("auth-title").textContent = wantsRegister ? "创建账号" : "登录工作台";
-  $("auth-subtitle").textContent = wantsRegister ? "注册普通用户或 VIP 账号，获得独立的文件空间。" : "使用账号进入你的文件与传输空间。";
+  if (entry.role === "admin") $("login-name").value = "admin";
+  showAuthHeading();
   notice("", "note", "auth-notice");
+}
+
+function entryLink(candidate) {
+  if ((candidate?.role !== "admin" && candidate?.role !== "user") ||
+      typeof candidate.name !== "string" || typeof candidate.origin !== "string") return null;
+  let url;
+  try {
+    url = new URL(candidate.origin);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== window.location.protocol || url.hostname !== window.location.hostname ||
+      url.origin === window.location.origin || url.pathname !== "/" ||
+      url.username || url.password || url.search || url.hash) return null;
+  const link = node("a", candidate.name);
+  link.href = url.origin;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  const arrow = node("span", "↗");
+  arrow.setAttribute("aria-hidden", "true");
+  link.append(arrow);
+  return link;
+}
+
+function showEntry(data) {
+  if (!["main", "admin", "user"].includes(data?.role) || typeof data.name !== "string") return;
+  entry = {role: data.role, name: data.name};
+  $("auth-entry").textContent = entry.name;
+  $("auth-entry").hidden = !entry.name;
+  const isAdmin = entry.role === "admin";
+  $("auth-toggle").hidden = isAdmin;
+  $("login-name").readOnly = isAdmin;
+  if (isAdmin) {
+    $("choose-login").setAttribute("aria-pressed", "true");
+    $("choose-register").setAttribute("aria-pressed", "false");
+    $("login-form").hidden = false;
+    $("register-form").hidden = true;
+    $("login-name").value = "admin";
+  }
+  showAuthHeading();
+  const links = entry.role === "main" && Array.isArray(data.entries) ? data.entries.map(entryLink).filter(Boolean) : [];
+  $("entry-links").replaceChildren(...links);
+  $("entry-switcher").hidden = links.length === 0;
+  $("workspace-entry-links").replaceChildren(...links.map((link) => link.cloneNode(true)));
+  $("workspace-entry-switcher").hidden = links.length === 0;
+  showSideRole();
+}
+
+function showSideRole() {
+  if (!user) return;
+  $("side-role").textContent = [roleName[user.role] || user.role, entry.role !== "main" ? entry.name : ""].filter(Boolean).join(" · ");
 }
 
 function clearViews() {
@@ -173,7 +235,7 @@ function openWorkspace(data) {
   $("auth").hidden = true;
   $("workspace").hidden = false;
   $("side-user").textContent = user.username;
-  $("side-role").textContent = roleName[user.role] || user.role;
+  showSideRole();
   $("side-avatar").textContent = user.username.slice(0, 1).toUpperCase();
   $("setting-user").textContent = user.username;
   $("setting-role").textContent = roleName[user.role] || user.role;
@@ -801,6 +863,9 @@ for (const button of document.querySelectorAll("[data-filter]")) {
 }
 
 window.addEventListener("resize", drawChart);
+request("/api/entry").then(showEntry).catch(() => {
+  // The default login remains available if the entry directory is unreachable.
+});
 request("/api/auth/me").then(openWorkspace).catch((error) => {
   if (error.status !== 401) notice(error.message, "error", "auth-notice");
 });

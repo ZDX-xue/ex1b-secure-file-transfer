@@ -2,9 +2,13 @@ name: ex1b-web
 services:
   transfer:
     build: .
-    command: ["--origin", "${EX1B_ORIGIN:-https://localhost:4443}"]
+    command: ["--origin", "${EX1B_ORIGIN:-https://localhost:4443}", "--admin-port", "4444", "--user-ports", "4445,4446,4447"]
     ports:
       - "${EX1B_BIND_IP:-127.0.0.1}:4443:4443"
+      - "${EX1B_BIND_IP:-127.0.0.1}:4444:4444"
+      - "${EX1B_BIND_IP:-127.0.0.1}:4445:4445"
+      - "${EX1B_BIND_IP:-127.0.0.1}:4446:4446"
+      - "${EX1B_BIND_IP:-127.0.0.1}:4447:4447"
     volumes:
       - transfer-data:/data
     read_only: true

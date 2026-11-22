@@ -15,6 +15,6 @@ FROM scratch
 COPY --from=build /out/ex1b /ex1b
 COPY --from=build --chown=10001:10001 /runtime-root/ /
 USER 10001:10001
-EXPOSE 4443
+EXPOSE 4443 4444 4445 4446 4447
 ENTRYPOINT ["/ex1b", "web", "--listen", "0.0.0.0:4443", "--data", "/data"]
 CMD ["--origin", "https://localhost:4443"]
