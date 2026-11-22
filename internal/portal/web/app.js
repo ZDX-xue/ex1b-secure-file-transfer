@@ -588,7 +588,8 @@ function drawChart() {
   const top = 12;
   const bottom = height - 29;
   ctx.font = "11px ui-sans-serif, sans-serif";
-  const left = Math.ceil(ctx.measureText(rate(max)).width + 12);
+  const axisLabels = Array.from({length: 5}, (_, index) => rate(index * max / 4));
+  const left = Math.ceil(Math.max(...axisLabels.map((label) => ctx.measureText(label).width)) + 12);
   const right = width - 8;
   const x = (time) => left + (right - left) * (time - start) / (end - start);
   const y = (value) => bottom - (bottom - top) * value / max;
@@ -609,7 +610,7 @@ function drawChart() {
     ctx.moveTo(left, row + 0.5);
     ctx.lineTo(right, row + 0.5);
     ctx.stroke();
-    ctx.fillText(rate(value), left - 8, row + 4);
+    ctx.fillText(axisLabels[i], left - 8, row + 4);
   }
   const ticks = width < 400 ? 3 : 5;
   const labels = historyRange === "24h" && width >= 510 ? axisDate : axisTime;
