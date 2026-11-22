@@ -129,6 +129,11 @@ func New(cfg identity.ServerConfig) (*Server, error) {
 		}
 	}
 	if cfg.AuditFile != "" {
+		events, err := loadAuditTail(cfg.AuditFile)
+		if err != nil {
+			s.logger.Printf("读取最近审计记录: %v", err)
+		}
+		s.events = events
 		audit, err := os.OpenFile(cfg.AuditFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
 		if err != nil {
 			s.Close()
@@ -184,6 +189,13 @@ func (s *Server) Snapshot() Snapshot {
 	return out
 }
 
+// TrafficSnapshot reads the live counters without copying session or audit history.
+func (s *Server) TrafficSnapshot() (Traffic, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.traffic, len(s.sessions)
+}
+
 func (s *Server) SetAccepting(value bool) {
 	s.accepting.Store(value)
 	status := "已暂停新连接"
@@ -196,11 +208,7 @@ func (s *Server) SetAccepting(value bool) {
 func (s *Server) record(event Event) {
 	event.Time = time.Now()
 	s.mu.Lock()
-	if len(s.events) == 160 {
-		copy(s.events, s.events[1:])
-		s.events = s.events[:159]
-	}
-	s.events = append(s.events, event)
+	s.events = appendAuditEvent(s.events, event)
 	s.mu.Unlock()
 	data, _ := json.Marshal(event)
 	s.logger.Print(string(data))
@@ -410,9 +418,9 @@ func (s *Server) run(ctx context.Context, user *account, session string, req wir
 		if storage.ValidateName(name) != nil {
 			name = ""
 		}
-		status := "完成"
-		if reply.Error != "" {
-			status = reply.Error
+		status := reply.Error
+		if status == "" {
+			status = transferAuditStatus(req.Kind, name, reply.Offset, reply.Done)
 		}
 		event := Event{User: user.ID, Session: session, Action: req.Kind, Name: name, Offset: reply.Offset, Status: status}
 		if reply.Error == "" {

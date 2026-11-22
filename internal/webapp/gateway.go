@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"ex1b/internal/identity"
+	"ex1b/internal/monitor"
 	"ex1b/internal/service"
 	"ex1b/internal/transfer"
 	"ex1b/internal/webauth"
@@ -50,6 +52,7 @@ type gateway struct {
 	authority *identity.Authority
 	registry  *webauth.Store
 	service   *service.Server
+	history   *monitor.History
 	transport string
 
 	mu             sync.Mutex
@@ -202,11 +205,16 @@ func Run(ctx context.Context, options Options) error {
 		return err
 	}
 	defer svc.Close()
+	history, err := monitor.Open(filepath.Join(data, "traffic-history.json"))
+	if err != nil {
+		log.Printf("无法加载流量历史，暂时使用内存采样：%v", err)
+		history, _ = monitor.Open("")
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	app := &gateway{
 		ctx: runCtx, data: data, authority: authority,
-		registry: registry, service: svc, transport: fileListener.Addr().String(), sessions: make(map[string]*browserSession),
+		registry: registry, service: svc, history: history, transport: fileListener.Addr().String(), sessions: make(map[string]*browserSession),
 	}
 	for _, user := range registry.List() {
 		if user.Role != "admin" {
@@ -216,6 +224,11 @@ func Run(ctx context.Context, options Options) error {
 		}
 	}
 	ended := make(chan error, len(entries)+1)
+	historyDone := make(chan struct{})
+	go func() {
+		defer close(historyDone)
+		app.sampleTraffic(runCtx)
+	}()
 	go app.expireSessions()
 	go func() { ended <- svc.Serve(runCtx, fileListener) }()
 	origins := make([]string, 0, len(entries))
@@ -249,6 +262,7 @@ func Run(ctx context.Context, options Options) error {
 		}
 	}
 	app.revoke("")
+	<-historyDone
 	return errors.Join(failures...)
 }
 

@@ -6,7 +6,7 @@ const roleRate = {normal: 256 * 1024, vip: 1024 * 1024};
 const routes = {
   files: ["文件与传输", "在一条加密会话中管理文件、并行传输和断点续传。"],
   sharing: ["用户互传", "通过服务端给已注册账号发送消息或文件。"],
-  monitor: ["服务监控", "查看验证会话、输入输出和最近一分钟的文件流量。"],
+  monitor: ["服务监控", "查看收发速率、历史流量和通过双向验证的传输会话。"],
   accounts: ["账号管理", "查看注册身份与带宽等级，也可停用、重置密码或删除账号。"],
   audit: ["操作记录", "核对服务端记录的会话、文件与管理操作。"],
   settings: ["账号设置", "查看账户信息、身份验证详情和更新密码。"],
@@ -39,7 +39,16 @@ let inboxKey = "";
 let accountKey = "";
 let lastSharePoll = 0;
 let previousTraffic = null;
-let traffic = [];
+const historyRanges = {"5m": ["近 5 分钟", 300000], "15m": ["近 15 分钟", 900000], "1h": ["近 1 小时", 3600000], "24h": ["近 24 小时", 86400000]};
+let historyRange = "15m";
+let historyData = null;
+let historyPollTime = 0;
+let historyRequest = 0;
+let historyPending = false;
+let selectedSample = null;
+let chartScale = null;
+let monitorSessions = [];
+let sessionFilter = "all";
 let accepting = true;
 let staging = 0;
 let uploads = [];
@@ -198,9 +207,17 @@ function clearViews() {
   filter = "all";
   mailbox = "inbox";
   previousTraffic = null;
-  traffic = [];
+  historyData = null;
+  historyPollTime = 0;
+  historyRequest++;
+  historyPending = false;
+  selectedSample = null;
+  monitorSessions = [];
+  sessionFilter = "all";
+  updateSessionFilter();
+  renderHistory();
   taskNodes.clear();
-  for (const id of ["files", "tasks", "inbox", "admin-sessions", "admin-users", "admin-events"]) {
+  for (const id of ["files", "tasks", "inbox", "admin-sessions", "admin-users", "admin-events", "monitor-events"]) {
     $(id).replaceChildren();
   }
   replaceOptions($("recipients"), "选择接收人", []);
@@ -263,7 +280,10 @@ function showRoute(next) {
     else link.removeAttribute("aria-current");
   }
   notice("");
-  if (route === "monitor") window.requestAnimationFrame(drawChart);
+  if (route === "monitor") {
+    window.requestAnimationFrame(drawChart);
+    refreshHistory();
+  }
   if (route === "sharing") lastSharePoll = 0;
   refresh();
 }
@@ -525,6 +545,30 @@ function updateMessageLength() {
   message.setCustomValidity(size > 512 ? "留言不能超过 512 字节。" : "");
 }
 
+const chartColors = {input: "#177d69", output: "#426eb0"};
+const axisTime = new Intl.DateTimeFormat("zh-CN", {hour: "2-digit", minute: "2-digit", hourCycle: "h23"});
+const axisDate = new Intl.DateTimeFormat("zh-CN", {month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23"});
+
+function rate(value) {
+  return value === null || value === undefined ? "—" : bytes(value) + "/s";
+}
+
+function chartCeiling(points) {
+  const highest = Math.max(1024, ...points.flatMap((point) => [point.input, point.output]));
+  const unit = 2 ** Math.floor(Math.log2(highest / 4));
+  return 4 * unit * Math.ceil(highest / (4 * unit));
+}
+
+function chartGroups(points, step) {
+  const groups = [];
+  for (const point of points) {
+    const last = groups.at(-1);
+    if (!last || point.time_ms - last.at(-1).time_ms > step * 1.5) groups.push([point]);
+    else last.push(point);
+  }
+  return groups;
+}
+
 function drawChart() {
   const canvas = $("traffic-chart");
   if (route !== "monitor" || $("workspace").hidden) return;
@@ -537,59 +581,281 @@ function drawChart() {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
   ctx.scale(dpi, dpi);
-  const top = 14;
-  const base = height - 20;
-  const left = 4;
-  const right = width - 4;
-  const now = performance.now();
-  const max = Math.max(1, ...traffic.flatMap((sample) => [sample.input, sample.output]));
-  ctx.strokeStyle = "#e5edf0";
-  for (let i = 0; i <= 4; i++) {
-    const y = top + (base - top) * i / 4;
-    ctx.beginPath();
-    ctx.moveTo(left, y);
-    ctx.lineTo(right, y);
-    ctx.stroke();
+  const points = historyData?.points || [];
+  const end = historyData?.end_ms || Date.now();
+  const start = historyData?.start_ms || end - historyRanges[historyRange][1];
+  const max = chartCeiling(points);
+  const top = 12;
+  const bottom = height - 29;
+  ctx.font = "11px ui-sans-serif, sans-serif";
+  const left = Math.ceil(ctx.measureText(rate(max)).width + 12);
+  const right = width - 8;
+  const x = (time) => left + (right - left) * (time - start) / (end - start);
+  const y = (value) => bottom - (bottom - top) * value / max;
+  chartScale = {left, right, top, bottom, start, end};
+
+  if (historyData?.since_ms > start) {
+    ctx.fillStyle = "#f4f7f8";
+    const covered = x(historyData.since_ms);
+    ctx.fillRect(left, top, Math.min(right, covered) - left, bottom - top);
   }
-  for (const [direction, color] of [["input", "#177866"], ["output", "#466fa8"]]) {
-    ctx.beginPath();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
-    traffic.forEach((sample, i) => {
-      const x = right - (right - left) * Math.max(0, now - sample.time) / 60000;
-      const y = base - (base - top) * sample[direction] / max;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
-  }
-  ctx.fillStyle = "#65777e";
-  ctx.font = "11px sans-serif";
-  ctx.fillText("−60 秒", left, height - 3);
+  ctx.fillStyle = "#647982";
+  ctx.strokeStyle = "#e6edf0";
   ctx.textAlign = "right";
-  ctx.fillText("现在", right, height - 3);
+  for (let i = 0; i <= 4; i++) {
+    const value = i * max / 4;
+    const row = y(value);
+    ctx.beginPath();
+    ctx.moveTo(left, row + 0.5);
+    ctx.lineTo(right, row + 0.5);
+    ctx.stroke();
+    ctx.fillText(rate(value), left - 8, row + 4);
+  }
+  const ticks = width < 400 ? 3 : 5;
+  const labels = historyRange === "24h" && width >= 510 ? axisDate : axisTime;
+  for (let i = 0; i <= ticks; i++) {
+    const time = start + (end - start) * i / ticks;
+    const at = x(time);
+    ctx.textAlign = i === 0 ? "left" : (i === ticks ? "right" : "center");
+    ctx.fillText(labels.format(time), at, height - 7);
+  }
+
+  const groups = chartGroups(points, historyData?.step_ms || 5000);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(left, top - 3, right - left, bottom - top + 6);
+  ctx.clip();
+  for (const [direction, color] of Object.entries(chartColors)) {
+    const gradient = ctx.createLinearGradient(0, top, 0, bottom);
+    gradient.addColorStop(0, color + "36");
+    gradient.addColorStop(1, color + "03");
+    for (const group of groups) {
+      if (group.length === 1) {
+        ctx.beginPath();
+        ctx.arc(x(group[0].time_ms), y(group[0][direction]), 2.5, 0, 2 * Math.PI);
+        ctx.fillStyle = color;
+        ctx.fill();
+        continue;
+      }
+      ctx.beginPath();
+      for (const [i, point] of group.entries()) {
+        const args = [x(point.time_ms), y(point[direction])];
+        if (i === 0) ctx.moveTo(...args);
+        else ctx.lineTo(...args);
+      }
+      ctx.lineWidth = 2;
+      ctx.lineJoin = "round";
+      ctx.strokeStyle = color;
+      ctx.stroke();
+      ctx.lineTo(x(group.at(-1).time_ms), bottom);
+      ctx.lineTo(x(group[0].time_ms), bottom);
+      ctx.closePath();
+      ctx.fillStyle = gradient;
+      ctx.fill();
+    }
+  }
+  const selected = points.find((point) => point.time_ms === selectedSample);
+  if (selected) {
+    const at = x(selected.time_ms);
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(at, top);
+    ctx.lineTo(at, bottom);
+    ctx.strokeStyle = "#687d88";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    for (const [direction, color] of Object.entries(chartColors)) {
+      ctx.beginPath();
+      ctx.arc(at, y(selected[direction]), 4, 0, 2 * Math.PI);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = "#fff";
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+  const tooltip = $("chart-tooltip");
+  tooltip.hidden = !selected;
+  if (selected) {
+    tooltip.dataset.side = x(selected.time_ms) > (right + left) / 2 ? "left" : "right";
+    $("chart-point-time").textContent = axisDate.format(selected.time_ms) + (historyData.step_ms < 60000 ? ":" + new Date(selected.time_ms).getSeconds().toString().padStart(2, "0") : "");
+    $("chart-point-input").textContent = "接收 " + rate(selected.input);
+    $("chart-point-output").textContent = "发送 " + rate(selected.output);
+  }
+}
+
+function selectSample(point, announce = false) {
+  const time = point?.time_ms ?? null;
+  if (selectedSample !== time) {
+    selectedSample = time;
+    drawChart();
+  }
+  if (announce) $("chart-announcement").textContent = point
+    ? [axisDate.format(time), stamp(time), "接收 " + rate(point.input), "发送 " + rate(point.output)].join("，")
+    : "";
+}
+
+function chartPointer(event) {
+  const points = historyData?.points;
+  if (!chartScale || !points?.length) return;
+  const bounds = event.currentTarget.getBoundingClientRect();
+  const {left, right, top, bottom, start, end} = chartScale;
+  const px = event.clientX - bounds.left;
+  const py = event.clientY - bounds.top;
+  if (px < left - 2 || px > right + 2 || py < top - 5 || py > bottom + 5) return selectSample(null);
+  const time = start + (end - start) * (px - left) / (right - left);
+  const point = points.reduce((a, b) => Math.abs(b.time_ms - time) < Math.abs(a.time_ms - time) ? b : a);
+  selectSample(Math.abs(point.time_ms - time) <= historyData.step_ms ? point : null);
+}
+
+function chartKeyboard(event) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End", "Escape"].includes(event.key)) return;
+  const points = historyData?.points || [];
+  if (!points.length) return;
+  if (event.key !== "Escape") event.preventDefault();
+  const current = points.findIndex((point) => point.time_ms === selectedSample);
+  const last = points.length - 1;
+  switch (event.key) {
+    case "ArrowLeft": selectSample(points[current < 0 ? last : Math.max(0, current - 1)], true); break;
+    case "ArrowRight": selectSample(points[Math.min(last, current + 1)], true); break;
+    case "Home": selectSample(points[0], true); break;
+    case "End": selectSample(points[last], true); break;
+    default: selectSample(null, true);
+  }
+}
+
+function renderHistory(problem = "") {
+  const data = historyData;
+  const measured = Boolean(data?.points?.length);
+  $("stat-window").textContent = historyRanges[historyRange][0];
+  $("history-received").textContent = measured ? bytes(data.totals?.received) : "—";
+  $("history-sent").textContent = measured ? bytes(data.totals?.sent) : "—";
+  $("history-input-avg").textContent = measured ? rate(data.average?.input) : "—";
+  $("history-output-avg").textContent = measured ? rate(data.average?.output) : "—";
+  $("history-input-peak").textContent = measured ? rate(data.peaks?.input) : "—";
+  $("history-output-peak").textContent = measured ? rate(data.peaks?.output) : "—";
+  $("history-online-peak").textContent = measured ? (data.peaks?.online ?? "—") : "—";
+  $("chart-empty").hidden = measured;
+  $("chart-empty").textContent = problem || (data ? "等待服务端完成首次采样" : "正在读取流量历史");
+  $("chart-last").textContent = measured ? "最近采样 " + stamp(data.points.at(-1).time_ms) : "";
+  $("chart-coverage").textContent = measured && data.since_ms ? "可用记录始于 " + axisDate.format(data.since_ms) : "等待服务端采样";
+  const step = data?.step_ms;
+  $("chart-resolution").textContent = step ? (step >= 60000 ? step / 60000 + " 分钟" : step / 1000 + " 秒") + "均值" : "";
+  drawChart();
+}
+
+async function refreshHistory(force = false) {
+  if (user?.role !== "admin" || route !== "monitor" ||
+      (!force && (historyPending || Date.now() - historyPollTime < 4800))) return;
+  const current = revision;
+  const key = historyRange;
+  const sent = ++historyRequest;
+  historyPollTime = Date.now();
+  historyPending = true;
+  try {
+    const data = await request("/api/admin/history?range=" + encodeURIComponent(key));
+    if (sent !== historyRequest || current !== revision || key !== historyRange) return;
+    historyData = data;
+    renderHistory();
+  } catch (error) {
+    if (sent !== historyRequest || current !== revision) return;
+    if (error.status === 401) showAuth("登录已失效，请重新登录。", "error");
+    else renderHistory("历史暂不可用");
+  } finally {
+    if (sent === historyRequest) historyPending = false;
+  }
 }
 
 function updateTraffic(data) {
   const {incoming = 0, outgoing = 0, received = 0, sent = 0, shared = 0} = data || {};
-  $("admin-incoming").textContent = incoming;
+  $("admin-incoming").textContent = "处理中 " + incoming;
   $("admin-received").textContent = "累计 " + bytes(received);
-  $("admin-outgoing").textContent = outgoing;
+  $("admin-outgoing").textContent = "处理中 " + outgoing;
   $("admin-sent").textContent = "累计 " + bytes(sent);
   $("admin-shared").textContent = shared;
   const time = performance.now();
-  if (!previousTraffic) {
+  if (!previousTraffic || received < previousTraffic.received || sent < previousTraffic.sent) {
     previousTraffic = {received, sent, time};
-    $("chart-last").textContent = "等待流量采样";
+    $("admin-input-rate").textContent = "—";
+    $("admin-output-rate").textContent = "—";
   } else if (time - previousTraffic.time >= 900) {
     const seconds = (time - previousTraffic.time) / 1000;
     const input = Math.max(0, (received - previousTraffic.received) / seconds);
     const output = Math.max(0, (sent - previousTraffic.sent) / seconds);
     previousTraffic = {received, sent, time};
-    traffic = [...traffic.filter((sample) => time - sample.time <= 60000), {input, output, time}];
-    $("chart-last").textContent = "输入 " + bytes(input) + "/s · 输出 " + bytes(output) + "/s";
+    $("admin-input-rate").textContent = rate(input);
+    $("admin-output-rate").textContent = rate(output);
   }
-  drawChart();
+}
+
+function transferActive(session) {
+  return (session.incoming || 0) + (session.outgoing || 0) > 0;
+}
+
+function duration(since) {
+  const seconds = Math.floor((Date.now() - new Date(since).getTime()) / 1000);
+  if (!since || !Number.isFinite(seconds) || seconds < 0) return "—";
+  if (seconds < 60) return seconds + " 秒";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + " 分 " + seconds % 60 + " 秒";
+  return Math.floor(minutes / 60) + " 小时 " + minutes % 60 + " 分";
+}
+
+function updateSessionFilter() {
+  for (const button of document.querySelectorAll("[data-session-filter]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.sessionFilter === sessionFilter));
+  }
+}
+
+function renderSessions() {
+  const transferring = monitorSessions.filter(transferActive);
+  const sessions = sessionFilter === "active" ? transferring : monitorSessions;
+  $("sessions-detail").textContent = monitorSessions.length + " 个在线 · " + transferring.length + " 个传输中";
+  $("sessions-empty").hidden = sessions.length > 0;
+  $("sessions-empty").textContent = sessionFilter === "active" ? "暂无正在传输的会话。" : "暂无活动会话。";
+  $("admin-sessions").replaceChildren(...[...sessions].sort((a, b) =>
+    Number(transferActive(b)) - Number(transferActive(a)) || String(a.id).localeCompare(String(b.id))
+  ).map((session) => {
+    const account = node("div");
+    account.append(node("div", session.user, "session-account"), node("small", [session.id, roleName[session.role]].filter(Boolean).join(" · "), "session-note"));
+    const status = node("div");
+    const tag = node("span", transferActive(session) ? "传输中" : "空闲", "session-tag");
+    tag.dataset.active = String(transferActive(session));
+    status.append(tag);
+    if (transferActive(session)) status.append(node("small", "收 " + (session.incoming || 0) + " · 发 " + (session.outgoing || 0), "session-note"));
+    const client = node("div", session.peer || "—");
+    client.append(node("small", session.rate ? "带宽上限 " + rate(session.rate) : "带宽上限 —", "session-note"));
+    const age = node("div", duration(session.since));
+    age.append(node("small", (session.requests ?? "—") + " 次请求", "session-note"));
+    return tableRow(account, status, client, bytes(session.received), bytes(session.sent), age);
+  }));
+}
+
+function renderMonitorEvents(events) {
+  const recent = [...events].reverse().slice(0, 5);
+  $("monitor-events-empty").hidden = recent.length > 0;
+  $("monitor-events").replaceChildren(...recent.map((event) => {
+    let tone = "other";
+    let symbol = "·";
+    if (event.action.startsWith("put_")) [tone, symbol] = ["input", "↓"];
+    else if (event.action.startsWith("get_")) [tone, symbol] = ["output", "↑"];
+    else if (event.action.startsWith("share")) [tone, symbol] = ["relay", "⇄"];
+    const icon = node("span", symbol, "monitor-event-icon");
+    icon.dataset.tone = tone;
+    icon.setAttribute("aria-hidden", "true");
+    const summary = node("div", undefined, "monitor-event-description");
+    const clock = node("time", stamp(event.time));
+    if (event.time) clock.dateTime = event.time;
+    summary.append(node("b", eventNames[event.action] || event.action), clock);
+    const detail = node("small", [event.user, event.name || event.recipient, event.status].filter(Boolean).join(" · "), "monitor-event-detail");
+    detail.title = detail.textContent;
+    const main = node("div");
+    main.append(summary, detail);
+    const row = node("li");
+    row.append(icon, main);
+    return row;
+  }));
 }
 
 function renderAdmin(data) {
@@ -600,13 +866,20 @@ function renderAdmin(data) {
   const accounts = data.accounts || [];
   const events = data.events || [];
   $("admin-online").textContent = sessions.length;
-  $("admin-capacity").textContent = "连接容量 " + (data.capacity ?? "—");
-  $("admin-address").textContent = data.address ? "文件传输地址 " + data.address : "等待传输服务上线";
+  $("admin-capacity").textContent = " / " + (data.capacity ?? "—");
+  const capacity = Number(data.capacity);
+  const used = capacity ? Math.round(sessions.length / capacity * 100) : 0;
+  $("admin-utilization").value = used;
+  $("admin-utilization-text").textContent = capacity ? used + "% 已用" : "容量未知";
+  $("admin-address").textContent = data.address || "等待传输服务上线";
   $("admission").textContent = accepting ? "暂停新连接" : "恢复接入";
   updateTraffic(data.traffic);
-  $("admin-sessions").replaceChildren(...[...sessions].sort((a, b) => String(a.id).localeCompare(String(b.id))).map((session) =>
-    tableRow(node("span", session.id, "mono"), session.user, session.peer, bytes(session.received), bytes(session.sent), session.requests)));
-  $("sessions-empty").hidden = sessions.length > 0;
+  monitorSessions = sessions;
+  if (route === "monitor") {
+    renderSessions();
+    renderMonitorEvents(events);
+    refreshHistory();
+  }
   $("member-count").textContent = accounts.length + " 个账号";
   const key = JSON.stringify([accounts, data.users]);
   if (accountKey !== key) {
@@ -832,6 +1105,34 @@ $("admission").addEventListener("click", async () => {
 });
 
 $("refresh-admin").addEventListener("click", refresh);
+$("monitor-audit").addEventListener("click", () => showRoute("audit"));
+for (const button of document.querySelectorAll("[data-monitor-range]")) {
+  button.addEventListener("click", () => {
+    const key = button.dataset.monitorRange;
+    if (!historyRanges[key] || key === historyRange) return;
+    historyRange = key;
+    historyData = null;
+    selectedSample = null;
+    $("chart-announcement").textContent = "";
+    for (const candidate of document.querySelectorAll("[data-monitor-range]")) {
+      candidate.setAttribute("aria-pressed", String(candidate === button));
+    }
+    renderHistory();
+    refreshHistory(true);
+  });
+}
+for (const button of document.querySelectorAll("[data-session-filter]")) {
+  button.addEventListener("click", () => {
+    sessionFilter = button.dataset.sessionFilter;
+    updateSessionFilter();
+    renderSessions();
+  });
+}
+$("traffic-chart").addEventListener("pointermove", chartPointer);
+$("traffic-chart").addEventListener("pointerdown", chartPointer);
+$("traffic-chart").addEventListener("pointerleave", () => selectSample(null));
+$("traffic-chart").addEventListener("keydown", chartKeyboard);
+$("traffic-chart").addEventListener("blur", () => selectSample(null, true));
 $("refresh-inbox").addEventListener("click", () => {
   lastSharePoll = 0;
   refresh();

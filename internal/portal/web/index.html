@@ -136,25 +136,91 @@
         </div>
       </section>
 
-      <section data-view="monitor" class="screen" hidden>
-        <div class="metrics">
-          <div class="metric"><span>在线传输会话</span><strong id="admin-online">—</strong><small id="admin-capacity">—</small></div>
-          <div class="metric"><span>输入流 · 正在处理</span><strong id="admin-incoming">—</strong><small id="admin-received">—</small></div>
-          <div class="metric"><span>输出流 · 正在处理</span><strong id="admin-outgoing">—</strong><small id="admin-sent">—</small></div>
-          <div class="metric"><span>互传消息和文件</span><strong id="admin-shared">—</strong><small>服务端转交记录</small></div>
-        </div>
-        <section class="card monitor-card">
-          <div class="card-head"><div><h2>文件流量</h2><p id="admin-address">正在读取服务状态</p></div><button class="secondary" id="admission" type="button">暂停新连接</button></div>
-          <div class="chart-wrap">
-            <div class="chart-legend"><span><i class="incoming-dot"></i>输入</span><span><i class="outgoing-dot"></i>输出</span><span id="chart-last">等待数据</span></div>
-            <canvas id="traffic-chart" aria-label="最近一分钟输入和输出流量趋势" role="img"></canvas>
+      <section data-view="monitor" class="screen monitor-view" hidden>
+        <div class="metrics monitor-metrics">
+          <div class="metric monitor-metric" data-tone="connection">
+            <div class="metric-caption"><span class="metric-icon" aria-hidden="true">◎</span><span>在线传输会话</span></div>
+            <div class="metric-value"><strong id="admin-online">—</strong><span id="admin-capacity"> / —</span></div>
+            <div class="capacity"><progress id="admin-utilization" max="100" value="0" aria-label="连接容量利用率"></progress><small id="admin-utilization-text">—</small></div>
           </div>
-        </section>
-        <section class="card">
-          <div class="card-head"><div><h2>活动会话</h2><p>已完成双向证书验证的文件传输连接。</p></div></div>
-          <div class="table-scroll"><table aria-label="活动会话"><thead><tr><th>会话编号</th><th>账号</th><th>客户端地址</th><th>接收</th><th>发送</th><th>请求</th></tr></thead><tbody id="admin-sessions"></tbody></table></div>
-          <p class="empty" id="sessions-empty">暂无活动会话。</p>
-        </section>
+          <div class="metric monitor-metric" data-tone="input">
+            <div class="metric-caption"><span class="metric-icon" aria-hidden="true">↓</span><span>实时接收</span></div>
+            <div class="metric-value"><strong id="admin-input-rate">—</strong></div>
+            <div class="metric-support"><small id="admin-received">累计 —</small><small id="admin-incoming">处理中 —</small></div>
+          </div>
+          <div class="metric monitor-metric" data-tone="output">
+            <div class="metric-caption"><span class="metric-icon" aria-hidden="true">↑</span><span>实时发送</span></div>
+            <div class="metric-value"><strong id="admin-output-rate">—</strong></div>
+            <div class="metric-support"><small id="admin-sent">累计 —</small><small id="admin-outgoing">处理中 —</small></div>
+          </div>
+          <div class="metric monitor-metric" data-tone="relay">
+            <div class="metric-caption"><span class="metric-icon" aria-hidden="true">⇄</span><span>互传记录</span></div>
+            <div class="metric-value"><strong id="admin-shared">—</strong><span>条</span></div>
+            <small>服务端转交的文件与消息</small>
+          </div>
+        </div>
+        <div class="monitor-top">
+          <section class="card monitor-card">
+            <div class="card-head">
+              <div><h2>传输吞吐</h2><p>文件数据速率</p></div>
+              <div class="segmented monitor-ranges" aria-label="流量时间范围">
+                <button type="button" data-monitor-range="5m" aria-pressed="false">5 分钟</button>
+                <button type="button" data-monitor-range="15m" aria-pressed="true">15 分钟</button>
+                <button type="button" data-monitor-range="1h" aria-pressed="false">1 小时</button>
+                <button type="button" data-monitor-range="24h" aria-pressed="false">24 小时</button>
+              </div>
+            </div>
+            <div class="monitor-plot">
+              <div class="chart-legend"><span><i class="incoming-dot"></i>接收</span><span><i class="outgoing-dot"></i>发送</span><span id="chart-last">正在读取流量历史</span></div>
+              <p class="monitor-sr-only" id="traffic-chart-help">聚焦图表后，用左右方向键切换采样点。</p>
+              <canvas id="traffic-chart" aria-label="选定时间范围的接收与发送速率" aria-describedby="traffic-chart-help" tabindex="0"></canvas>
+              <p id="chart-announcement" class="monitor-sr-only" aria-live="polite"></p>
+              <p id="chart-empty" class="chart-empty" hidden>正在等待服务端采样</p>
+              <section class="chart-tooltip" id="chart-tooltip" hidden aria-hidden="true">
+                <strong id="chart-point-time"></strong>
+                <small id="chart-point-input"></small>
+                <small id="chart-point-output"></small>
+              </section>
+            </div>
+            <div class="chart-footer"><span id="chart-coverage">等待服务端采样</span><span id="chart-resolution"></span></div>
+          </section>
+          <section class="card monitor-summary">
+            <div class="card-head"><div><h2>时段统计</h2><p id="stat-window">近 15 分钟</p></div></div>
+            <div class="summary-main">
+              <dl class="summary-values">
+                <div><dt><i class="incoming-dot"></i>时段接收量</dt><dd id="history-received">—</dd></div>
+                <div><dt><i class="outgoing-dot"></i>时段发送量</dt><dd id="history-sent">—</dd></div>
+              </dl>
+              <table class="history-rates" aria-label="时段平均与峰值速率">
+                <thead><tr><th>速率</th><th>接收</th><th>发送</th></tr></thead>
+                <tbody>
+                  <tr><th scope="row">平均</th><td id="history-input-avg">—</td><td id="history-output-avg">—</td></tr>
+                  <tr><th scope="row">峰值</th><td id="history-input-peak">—</td><td id="history-output-peak">—</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="summary-tail"><span>最高在线会话</span><strong id="history-online-peak">—</strong></div>
+            <div class="monitor-endpoint"><small>文件传输地址</small><b class="mono" id="admin-address">—</b><button class="secondary compact" id="admission" type="button">暂停新连接</button></div>
+          </section>
+        </div>
+        <div class="monitor-bottom">
+          <section class="card sessions-card">
+            <div class="card-head">
+              <div><h2>活动会话</h2><p id="sessions-detail">已通过双向证书验证的连接</p></div>
+              <div class="segmented" aria-label="筛选活动会话">
+                <button data-session-filter="all" type="button" aria-pressed="true">全部</button>
+                <button data-session-filter="active" type="button" aria-pressed="false">传输中</button>
+              </div>
+            </div>
+            <div class="table-scroll"><table class="session-table" aria-label="活动会话"><thead><tr><th>会话与账号</th><th>传输状态</th><th>客户端地址</th><th>接收</th><th>发送</th><th>连接时长</th></tr></thead><tbody id="admin-sessions"></tbody></table></div>
+            <p class="empty" id="sessions-empty">暂无活动会话。</p>
+          </section>
+          <section class="card monitor-activity">
+            <div class="card-head"><div><h2>最近操作</h2><p>最新的服务端记录</p></div><button id="monitor-audit" class="ghost compact" type="button">全部记录 →</button></div>
+            <ol id="monitor-events" class="monitor-event-list"></ol>
+            <p class="empty" id="monitor-events-empty">暂无服务端记录。</p>
+          </section>
+        </div>
       </section>
 
       <section data-view="accounts" class="screen" hidden>

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"ex1b/internal/monitor"
 	"ex1b/internal/webauth"
 )
 
@@ -98,6 +99,60 @@ func TestPortalsKeepSessionsSeparateInOneCookieJar(t *testing.T) {
 		t.Fatalf("logout status = %d, cookies = %v", w.Code, cookies)
 	}
 	me(adminRoutes, adminEntry, "admin")
+}
+
+func TestMonitorHistoryIsAdminOnly(t *testing.T) {
+	accounts, err := webauth.Open(filepath.Join(t.TempDir(), "accounts.json"), "portal-test-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, _ := accounts.Lookup("admin")
+	user, err := accounts.Register("alice", "portal-test-password", "normal", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := portalEntry{origin: "http://localhost:44080", host: "localhost:44080", role: "main", cookie: "ex1b_web_session_44080"}
+	history, err := monitor.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	history.Record(now.Add(-10*time.Second), monitor.Counters{})
+	history.Record(now.Add(-5*time.Second), monitor.Counters{Received: 1 << 20, Online: 2})
+	app := &gateway{
+		registry: accounts, history: history, sessions: map[string]*browserSession{
+			"admin": {user: admin, portalHost: entry.host, expiry: now.Add(time.Hour)},
+			"alice": {user: user, portalHost: entry.host, expiry: now.Add(time.Hour)},
+		},
+	}
+	handler := app.routes(entry, []portalEntry{entry})
+	for _, tc := range []struct {
+		token string
+		query string
+		want  int
+	}{
+		{"", "15m", http.StatusUnauthorized},
+		{"alice", "15m", http.StatusForbidden},
+		{"admin", "2h", http.StatusBadRequest},
+		{"admin", "24h", http.StatusOK},
+	} {
+		req := httptest.NewRequest("GET", entry.origin+"/api/admin/history?range="+tc.query, nil)
+		if tc.token != "" {
+			req.AddCookie(&http.Cookie{Name: entry.cookie, Value: tc.token})
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Fatalf("%s %s returned %d, want %d", tc.token, tc.query, rec.Code, tc.want)
+		}
+		if tc.want == http.StatusOK {
+			var window monitor.Window
+			if err := json.NewDecoder(rec.Body).Decode(&window); err != nil ||
+				window.Range != "24h" || len(window.Points) != 1 || window.Totals.Received != 1<<20 {
+				t.Fatalf("unexpected samples: %+v, %v", window, err)
+			}
+		}
+	}
 }
 
 func TestPortalLoginRoleAndListenerOrigin(t *testing.T) {

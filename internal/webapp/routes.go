@@ -112,6 +112,22 @@ func (g *gateway) routes(entry portalEntry, entries []portalEntry) http.Handler 
 			service.Snapshot
 		}{g.registry.List(), g.service.Snapshot()})
 	}))
+	mux.HandleFunc("GET /api/admin/history", requireSession("admin", func(w http.ResponseWriter, r *http.Request, _ *browserSession) {
+		if g.history == nil {
+			fail(w, http.StatusServiceUnavailable, "流量历史尚未就绪")
+			return
+		}
+		window := r.URL.Query().Get("range")
+		if window == "" {
+			window = "15m"
+		}
+		data, err := g.history.Window(window, time.Now())
+		if err != nil {
+			fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		respond(w, http.StatusOK, data)
+	}))
 	mux.HandleFunc("POST /api/admin/admission", requireSession("admin", func(w http.ResponseWriter, r *http.Request, s *browserSession) {
 		var request struct {
 			Accepting *bool `json:"accepting"`
