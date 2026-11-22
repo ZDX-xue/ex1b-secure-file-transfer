@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="client-token" content="CLIENT_TOKEN">
+  <title>安全文件传输 · 客户端</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <span class="app-title">安全文件传输</span>
+      <span class="current-page">客户端</span>
+      <span class="connection" id="connection" data-state="connecting" role="status">
+        <span class="connection-dot" aria-hidden="true"></span>
+        <span id="connection-text">正在连接</span>
+      </span>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <section class="overview" aria-labelledby="workspace-heading">
+      <div class="overview-heading">
+        <h1 id="workspace-heading">文件工作台</h1>
+        <button id="reconnect" class="button secondary" type="button" title="断开当前连接并建立新连接，传输任务可继续">重连</button>
+      </div>
+      <dl class="session-details">
+        <div><dt>当前账号</dt><dd id="account">—</dd></div>
+        <div><dt>传输带宽</dt><dd id="bandwidth">—</dd></div>
+        <div><dt>会话 ID</dt><dd id="session" class="mono">—</dd></div>
+        <div><dt>连接协议</dt><dd id="protocol">—</dd></div>
+      </dl>
+    </section>
+
+    <p id="notice" class="notice" role="status" hidden></p>
+
+    <div class="panels">
+      <section class="panel" aria-labelledby="files-heading">
+        <header class="panel-header">
+          <div>
+            <h2 id="files-heading">远端文件</h2>
+            <p id="file-total" class="meta">正在读取</p>
+          </div>
+          <div class="panel-actions">
+            <input id="selected-files" type="file" multiple hidden>
+            <button id="upload" class="button primary" type="button" disabled>上传文件</button>
+          </div>
+        </header>
+        <div class="file-table">
+          <table aria-labelledby="files-heading">
+            <thead><tr><th scope="col">文件名</th><th scope="col">大小</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead>
+            <tbody id="files"></tbody>
+          </table>
+        </div>
+        <div id="files-empty" class="empty-state" hidden>
+          <p id="files-message">远端目录暂无文件</p>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="tasks-heading">
+        <header class="panel-header">
+          <div>
+            <h2 id="tasks-heading">传输队列</h2>
+            <p id="task-total" class="meta">0 个任务</p>
+          </div>
+          <div class="filters" role="group" aria-label="筛选传输任务">
+            <button type="button" data-filter="all" aria-pressed="true">全部</button>
+            <button type="button" data-filter="active" aria-pressed="false">进行中</button>
+            <button type="button" data-filter="done" aria-pressed="false">已完成</button>
+          </div>
+        </header>
+        <ol class="tasks" id="tasks"></ol>
+        <div id="tasks-empty" class="empty-state"><p id="tasks-message">暂无传输任务</p></div>
+      </section>
+    </div>
+  </main>
+
+  <template id="file-row">
+    <tr>
+      <td><span class="file-name"></span><span class="file-hash mono"></span></td>
+      <td class="file-size"></td>
+      <td><button type="button" class="button compact secondary">下载</button></td>
+    </tr>
+  </template>
+
+  <template id="task-row">
+    <li class="task">
+      <span class="direction" aria-hidden="true"></span>
+      <div class="task-body">
+        <div class="task-headline"><span class="task-name"></span><span class="task-state"></span></div>
+        <progress max="100" value="0" aria-label="传输进度"></progress>
+        <div class="task-size meta"></div>
+        <div class="task-detail"></div>
+      </div>
+      <div class="task-actions"></div>
+    </li>
+  </template>
+</body>
+</html>

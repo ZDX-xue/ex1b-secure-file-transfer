@@ -1,0 +1,6 @@
+/bin/
+/demo/
+*.log
+*.key
+*.exe
+.DS_Store
