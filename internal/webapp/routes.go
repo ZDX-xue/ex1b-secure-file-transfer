@@ -86,6 +86,8 @@ func (g *gateway) routes() http.Handler {
 		success(w)
 	}))
 	mux.HandleFunc("POST /api/admin/users/{username}/state", g.authorize("admin", g.userState))
+	mux.HandleFunc("POST /api/admin/users/{username}/password", g.authorize("admin", g.resetUserPassword))
+	mux.HandleFunc("POST /api/admin/users/{username}/delete", g.authorize("admin", g.deleteUser))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		w.Header().Set("Cache-Control", "no-store")
@@ -190,6 +192,9 @@ func (g *gateway) login(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusTooManyRequests, "操作太频繁，请稍后再试")
 		return
 	}
+	// Serialize publication of a new session with credential resets and deletion.
+	g.accountChanges.Lock()
+	defer g.accountChanges.Unlock()
 	user, err := g.registry.Authenticate(in.Username, in.Password)
 	if err != nil {
 		authFailure(w, err)
@@ -327,6 +332,8 @@ func (g *gateway) changePassword(w http.ResponseWriter, r *http.Request, s *brow
 	if !readJSON(w, r, &in) {
 		return
 	}
+	g.accountChanges.Lock()
+	defer g.accountChanges.Unlock()
 	if err := g.registry.ChangePassword(s.user.Username, in.Current, in.New); err != nil {
 		authFailure(w, err)
 		return
@@ -365,6 +372,48 @@ func (g *gateway) userState(w http.ResponseWriter, r *http.Request, s *browserSe
 		g.revoke(id)
 	}
 	respond(w, http.StatusOK, user)
+}
+
+func (g *gateway) resetUserPassword(w http.ResponseWriter, r *http.Request, _ *browserSession) {
+	var in struct {
+		New string `json:"new_password"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	id := r.PathValue("username")
+	g.accountChanges.Lock()
+	defer g.accountChanges.Unlock()
+	if err := g.registry.ResetPassword(id, in.New); err != nil {
+		authFailure(w, err)
+		return
+	}
+	g.revoke(id)
+	g.service.PasswordReset(id)
+	success(w)
+}
+
+func (g *gateway) deleteUser(w http.ResponseWriter, r *http.Request, _ *browserSession) {
+	var in struct {
+		Confirm string `json:"confirm_username"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	id := r.PathValue("username")
+	if in.Confirm != id {
+		fail(w, http.StatusBadRequest, "确认输入的账号名与目标账号不一致")
+		return
+	}
+	g.accountChanges.Lock()
+	defer g.accountChanges.Unlock()
+	if err := g.registry.Delete(id); err != nil {
+		authFailure(w, err)
+		return
+	}
+	g.revoke(id)
+	g.service.RemoveUser(id)
+	success(w)
 }
 
 func (g *gateway) people(w http.ResponseWriter, r *http.Request, s *browserSession) {

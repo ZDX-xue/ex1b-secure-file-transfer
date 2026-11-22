@@ -151,7 +151,7 @@
       <section data-view="accounts" class="screen" hidden>
         <section class="card">
           <div class="card-head"><div><h2>已注册账号</h2><p id="member-count">0 个账号</p></div></div>
-          <div class="table-scroll"><table aria-label="已注册账号"><thead><tr><th>用户名</th><th>等级</th><th>带宽上限</th><th>状态</th><th class="end">操作</th></tr></thead><tbody id="admin-users"></tbody></table></div>
+          <div class="table-scroll"><table class="account-table" aria-label="已注册账号"><thead><tr><th>用户名</th><th>等级</th><th>带宽上限</th><th>状态</th><th class="end">操作</th></tr></thead><tbody id="admin-users"></tbody></table></div>
         </section>
       </section>
 
@@ -189,5 +189,23 @@
       </section>
     </main>
   </div>
+
+  <dialog id="manage-account" class="account-dialog" aria-labelledby="manage-account-title" aria-describedby="manage-account-detail">
+    <header class="dialog-head">
+      <h2 id="manage-account-title"></h2>
+      <p id="manage-account-detail"></p>
+    </header>
+    <p id="manage-account-notice" class="inline-notice dialog-notice" role="alert" hidden></p>
+    <form id="reset-member-password" class="form inner-form" hidden>
+      <input id="reset-member-name" type="text" name="username" autocomplete="username" hidden>
+      <label>新密码<input id="member-new-password" type="password" name="new_password" autocomplete="new-password" maxlength="128" required><small>密码长度为 10–128 字节。</small></label>
+      <label>确认新密码<input type="password" name="confirm_password" autocomplete="new-password" maxlength="128" required></label>
+      <div class="dialog-actions"><button class="secondary" type="button" data-dismiss-account>取消</button><button class="primary" type="submit">保存新密码</button></div>
+    </form>
+    <form id="delete-member-account" class="form inner-form" hidden>
+      <label>输入账号名确认删除<input id="confirm-member-name" name="confirm_username" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32" required></label>
+      <div class="dialog-actions"><button class="secondary" type="button" data-dismiss-account>取消</button><button class="danger" type="submit">确认删除账号</button></div>
+    </form>
+  </dialog>
 </body>
 </html>

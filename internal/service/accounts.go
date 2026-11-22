@@ -122,14 +122,45 @@ func (s *Server) SetUserEnabled(id string, enabled bool) error {
 	status := "已启用账号"
 	if !enabled {
 		status = "已停用账号"
-		for _, session := range s.sessions {
-			if session.User == id {
-				session.cancel()
-				_ = session.conn.Close()
-			}
-		}
+		s.disconnectUser(id)
 	}
 	s.mu.Unlock()
 	s.record(Event{User: "admin", Action: "account", Recipient: id, Status: status})
 	return nil
+}
+
+// disconnectUser requires s.mu and cancels the user's transfers before closing
+// the sockets. It is shared by suspension, password reset and deletion.
+func (s *Server) disconnectUser(id string) {
+	for _, session := range s.sessions {
+		if session.User == id {
+			session.cancel()
+			_ = session.conn.Close()
+		}
+	}
+}
+
+func (s *Server) PasswordReset(id string) {
+	s.mu.Lock()
+	s.disconnectUser(id)
+	s.mu.Unlock()
+	s.record(Event{User: "admin", Action: "account", Recipient: id, Status: "已重置密码"})
+}
+
+// RemoveUser revokes the transport identity while retaining the archived files.
+// The Web registry commits the removal and reserves the username first.
+func (s *Server) RemoveUser(id string) {
+	s.mu.Lock()
+	account := s.byID[id]
+	if account != nil {
+		account.enabled.Store(false)
+		delete(s.byID, id)
+		delete(s.accounts, account.Fingerprint)
+		s.disconnectUser(id)
+	}
+	s.mu.Unlock()
+	if account != nil {
+		_ = account.storage.Close()
+	}
+	s.record(Event{User: "admin", Action: "account", Recipient: id, Status: "已删除账号，文件留档"})
 }

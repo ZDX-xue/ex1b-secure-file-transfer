@@ -124,6 +124,14 @@ th:last-child, td:last-child { padding-right: 17px; }
 tbody tr:last-child td { border-bottom: 0; }
 .end { text-align: right; }
 .cell-actions { display: flex; justify-content: end; gap: 3px; }
+.account-actions { flex-wrap: wrap; gap: 5px; }
+.account-table td:first-child { white-space: normal; overflow-wrap: anywhere; }
+.account-dialog { width: min(100% - 28px, 460px); max-height: calc(100% - 28px); padding: 0; border: 1px solid var(--line); border-radius: 13px; background: var(--card); color: var(--ink); box-shadow: 0 16px 42px #0c263443; }
+.account-dialog::backdrop { background: #0c263466; }
+.dialog-head { padding: 17px 17px 12px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.dialog-head p { margin-top: 6px; color: var(--muted); }
+.dialog-notice { margin: 12px 17px 0; }
+.dialog-actions { display: flex; flex-wrap: wrap; justify-content: end; gap: 7px; }
 .file-title { display: block; overflow: hidden; text-overflow: ellipsis; max-width: min(240px, 25vw); }
 .digest { letter-spacing: 0; }
 .empty { color: var(--muted); padding: 22px 17px; }
@@ -197,4 +205,10 @@ tbody tr:last-child td { border-bottom: 0; }
   .chart-legend span:last-child { margin-left: 0; }
   .definitions > div { flex-wrap: wrap; }
   .definitions dd { text-align: left; }
+}
+@media (max-width: 540px) {
+  .account-table th, .account-table td { white-space: normal; padding-inline: 6px; }
+  .account-table th:first-child, .account-table td:first-child { padding-left: 9px; }
+  .account-table th:last-child, .account-table td:last-child { padding-right: 9px; }
+  .account-actions > button { padding-inline: 6px; }
 }

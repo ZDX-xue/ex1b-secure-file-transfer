@@ -7,7 +7,7 @@ const routes = {
   files: ["文件与传输", "在一条加密会话中管理文件、并行传输和断点续传。"],
   sharing: ["用户互传", "通过服务端给已注册账号发送消息或文件。"],
   monitor: ["服务监控", "查看验证会话、输入输出和最近一分钟的文件流量。"],
-  accounts: ["账号管理", "查看注册身份、带宽等级和接入状态。"],
+  accounts: ["账号管理", "查看注册身份与带宽等级，也可停用、重置密码或删除账号。"],
   audit: ["操作记录", "核对服务端记录的会话、文件与管理操作。"],
   settings: ["账号设置", "查看账户信息、身份验证详情和更新密码。"],
 };
@@ -43,6 +43,8 @@ let traffic = [];
 let accepting = true;
 let staging = 0;
 let uploads = [];
+let managedAccount = null;
+let accountActionTrigger = null;
 
 function node(tag, text, className) {
   const element = document.createElement(tag);
@@ -120,6 +122,7 @@ function authMode(wantsRegister) {
 }
 
 function clearViews() {
+  if ($("manage-account").open) $("manage-account").close();
   taskState = [];
   peopleState = [];
   uploads = [];
@@ -551,14 +554,16 @@ function renderAdmin(data) {
       const enabled = account.enabled !== false;
       const pill = node("span", enabled ? "启用" : "停用", "pill");
       pill.dataset.variant = enabled ? "on" : "off";
-      const actions = node("div", undefined, "cell-actions");
+      const actions = node("div", undefined, "cell-actions account-actions");
       if (account.role !== "admin") {
         actions.append(action(enabled ? "停用" : "启用", async () => {
           if (enabled && !window.confirm("停用 " + account.username + " 后，该账号当前登录和传输会话会断开。")) return;
           await post("/api/admin/users/" + encodeURIComponent(account.username) + "/state", {enabled: !enabled});
           notice("账号状态已更新。");
           refresh();
-        }, enabled ? "danger compact" : "secondary compact"));
+        }),
+        accountDialogAction(account, "password", "重置密码", "secondary compact"),
+        accountDialogAction(account, "delete", "删除账号", "danger compact"));
       }
       const rate = realRates.get(account.username) || roleRate[account.role];
       return tableRow(account.username, roleName[account.role] || account.role, rate ? bytes(rate) + "/s" : "—", pill, actions);
@@ -572,6 +577,78 @@ function renderAdmin(data) {
   }));
   $("events-empty").hidden = events.length > 0;
 }
+
+function accountDialogAction(account, mode, label, className) {
+  const button = node("button", label, className);
+  button.type = "button";
+  button.addEventListener("click", () => openAccountDialog(account, mode, button));
+  return button;
+}
+
+function openAccountDialog(account, mode, trigger) {
+  if (user?.role !== "admin" || account.role === "admin" || $("manage-account").open) return;
+  const deleting = mode === "delete";
+  managedAccount = account.username;
+  accountActionTrigger = trigger;
+  $("manage-account-title").textContent = (deleting ? "删除账号 " : "重置密码 · ") + account.username;
+  $("manage-account-detail").textContent = deleting
+    ? "删除后该账号将退出登录并失去文件访问权限。系统保留已有文件和操作记录，原用户名不能重新注册。"
+    : "重置后该账号的现有会话会退出，需使用新密码重新登录。" + (account.enabled === false ? "账号仍保持停用状态。" : "");
+  $("reset-member-password").hidden = deleting;
+  $("delete-member-account").hidden = !deleting;
+  $("reset-member-name").value = account.username;
+  notice("", "note", "manage-account-notice");
+  $("manage-account").showModal();
+  $(deleting ? "confirm-member-name" : "member-new-password").focus();
+}
+
+function accountDialogBusy() {
+  return Boolean($("manage-account").querySelector('form:not([hidden]) button[type="submit"]:disabled'));
+}
+
+$("manage-account").addEventListener("cancel", (event) => {
+  if (accountDialogBusy()) event.preventDefault();
+});
+$("manage-account").addEventListener("close", () => {
+  if ($("manage-account").open) return;
+  const trigger = accountActionTrigger;
+  managedAccount = null;
+  accountActionTrigger = null;
+  $("reset-member-password").reset();
+  $("delete-member-account").reset();
+  notice("", "note", "manage-account-notice");
+  if (user?.role === "admin" && route === "accounts") {
+    if (trigger?.isConnected) trigger.focus();
+    else $("route-name").focus();
+  }
+});
+for (const button of document.querySelectorAll("[data-dismiss-account]")) {
+  button.addEventListener("click", () => {
+    if (!accountDialogBusy()) $("manage-account").close();
+  });
+}
+
+formHandler("reset-member-password", async (data) => {
+  const username = managedAccount;
+  if (!username) return;
+  const size = utf8.encode(data.new_password).length;
+  if (size < 10 || size > 128) throw new Error("新密码长度应为 10–128 字节。");
+  if (data.new_password !== data.confirm_password) throw new Error("两次输入的密码不一致。");
+  await post("/api/admin/users/" + encodeURIComponent(username) + "/password", {new_password: data.new_password});
+  $("manage-account").close();
+  notice(username + " 的密码已重置，旧会话已退出。");
+  refresh();
+}, "manage-account-notice");
+
+formHandler("delete-member-account", async (data) => {
+  const username = managedAccount;
+  if (!username) return;
+  if (data.confirm_username !== username) throw new Error("请输入与所选账号完全一致的用户名。");
+  await post("/api/admin/users/" + encodeURIComponent(username) + "/delete", {confirm_username: data.confirm_username});
+  $("manage-account").close();
+  notice("账号 " + username + " 已删除。");
+  refresh();
+}, "manage-account-notice");
 
 async function refresh() {
   if (!user || polling === revision) return;

@@ -121,3 +121,90 @@ func TestPersistenceFailureDoesNotPublish(t *testing.T) {
 		t.Fatal("failed disk write changed visible registry")
 	}
 }
+
+func TestAdminResetAndDelete(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "accounts.json")
+	store, err := Open(path, initialAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Register("member", firstPass, "vip", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ResetPassword("admin", nextPass); !errors.Is(err, ErrAdmin) {
+		t.Fatalf("admin reset: %v", err)
+	}
+	if err := store.Delete("admin"); !errors.Is(err, ErrAdmin) {
+		t.Fatalf("admin deletion: %v", err)
+	}
+	for _, name := range []string{"unknown", "member"} {
+		want := ErrPassword
+		if name == "unknown" {
+			want = ErrAccount
+		}
+		if err := store.ResetPassword(name, "short"); !errors.Is(err, want) {
+			t.Fatalf("invalid reset for %s: %v", name, err)
+		}
+	}
+	if _, err := store.SetEnabled("member", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ResetPassword("member", nextPass); err != nil {
+		t.Fatal(err)
+	}
+	if member, ok := store.Lookup("member"); !ok || member.Enabled || member.Role != "vip" {
+		t.Fatalf("reset changed account status or role: %+v", member)
+	}
+	if _, err := store.Authenticate("member", nextPass); !errors.Is(err, ErrCredentials) {
+		t.Fatalf("reset enabled a disabled account: %v", err)
+	}
+	if _, err := store.SetEnabled("member", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Authenticate("member", firstPass); !errors.Is(err, ErrCredentials) {
+		t.Fatalf("reset did not replace the old password: %v", err)
+	}
+	if _, err := store.Authenticate("member", nextPass); err != nil {
+		t.Fatalf("password reset failed: %v", err)
+	}
+	if err := store.Delete("member"); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := reopened.Lookup("member"); exists || len(reopened.List()) != 1 {
+		t.Fatal("deleted account is still visible")
+	}
+	if _, err := reopened.Authenticate("member", nextPass); !errors.Is(err, ErrCredentials) {
+		t.Fatalf("deleted account authenticated: %v", err)
+	}
+	if _, err := reopened.Register("member", firstPass, "normal", func(User) error {
+		t.Error("a reserved username must never reach provisioning")
+		return nil
+	}); !errors.Is(err, ErrExists) {
+		t.Fatalf("deleted username was made available after restart: %v", err)
+	}
+}
+
+func TestAdminWriteFailureLeavesCredentialInPlace(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(filepath.Join(dir, "accounts.json"), initialAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Register("member", firstPass, "normal", nil); err != nil {
+		t.Fatal(err)
+	}
+	store.path = filepath.Join(dir, "missing", "accounts.json")
+	if err := store.ResetPassword("member", nextPass); err == nil {
+		t.Fatal("password reset should fail if commit cannot be written")
+	}
+	if err := store.Delete("member"); err == nil {
+		t.Fatal("deletion should fail if commit cannot be written")
+	}
+	if _, err := store.Authenticate("member", firstPass); err != nil {
+		t.Fatalf("failed admin operation changed original credential: %v", err)
+	}
+}
