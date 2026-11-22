@@ -128,6 +128,9 @@ func (g *gateway) routes(entry portalEntry, entries []portalEntry) http.Handler 
 		}
 		respond(w, http.StatusOK, data)
 	}))
+	mux.HandleFunc("GET /api/admin/protocol", requireSession("admin", func(w http.ResponseWriter, r *http.Request, _ *browserSession) {
+		respond(w, http.StatusOK, g.service.ProtocolSnapshot())
+	}))
 	mux.HandleFunc("POST /api/admin/admission", requireSession("admin", func(w http.ResponseWriter, r *http.Request, s *browserSession) {
 		var request struct {
 			Accepting *bool `json:"accepting"`

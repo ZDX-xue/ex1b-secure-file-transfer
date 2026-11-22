@@ -41,7 +41,8 @@ type Header struct {
 
 type Frame struct {
 	Header
-	Body []byte
+	Body        []byte
+	HeaderBytes int `json:"-"`
 }
 
 func Read(reader io.Reader) (Frame, error) {
@@ -72,26 +73,37 @@ func Read(reader io.Reader) (Frame, error) {
 			return Frame{}, err
 		}
 	}
+	frame.HeaderBytes = int(size)
 	return frame, nil
 }
 
 func Write(writer io.Writer, frame Frame) error {
+	_, err := WriteMeasured(writer, frame)
+	return err
+}
+
+// WriteMeasured reports the encoded JSON header bytes after a complete write.
+// The four length-prefix bytes and payload are excluded.
+func WriteMeasured(writer io.Writer, frame Frame) (int, error) {
 	frame.Version = Version
 	frame.BodyLen = len(frame.Body)
 	if frame.ID == 0 || frame.Kind == "" || frame.BodyLen > MaxBody {
-		return fmt.Errorf("无法发送超限或无编号的报文")
+		return 0, fmt.Errorf("无法发送超限或无编号的报文")
 	}
 	header, err := json.Marshal(frame.Header)
 	if err != nil || len(header) > MaxHeader {
-		return fmt.Errorf("无法编码报文头")
+		return 0, fmt.Errorf("无法编码报文头")
 	}
 	data := make([]byte, 4+len(header)+len(frame.Body))
 	binary.BigEndian.PutUint32(data[:4], uint32(len(header)))
 	copy(data[4:], header)
 	copy(data[4+len(header):], frame.Body)
 	n, err := writer.Write(data)
-	if err == nil && n != len(data) {
-		return io.ErrShortWrite
+	if err != nil {
+		return 0, err
 	}
-	return err
+	if n != len(data) {
+		return 0, io.ErrShortWrite
+	}
+	return len(header), nil
 }

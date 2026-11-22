@@ -7,6 +7,7 @@ const routes = {
   files: ["文件与传输", "在一条加密会话中管理文件、并行传输和断点续传。"],
   sharing: ["用户互传", "通过服务端给已注册账号发送消息或文件。"],
   monitor: ["服务监控", "查看收发速率、历史流量和通过双向验证的传输会话。"],
+  protocol: ["协议追踪", "查看实际握手参数与应用层报文的头部和字节计数。"],
   accounts: ["账号管理", "查看注册身份与带宽等级，也可停用、重置密码或删除账号。"],
   audit: ["操作记录", "核对服务端记录的会话、文件与管理操作。"],
   settings: ["账号设置", "查看账户信息、身份验证详情和更新密码。"],
@@ -18,6 +19,12 @@ const eventNames = {
   put_begin: "开始上传", put_finish: "上传校验", get_begin: "开始下载",
   get_finish: "下载校验", admission: "接入控制", frame: "报文检查", limit: "资源控制",
   share_send: "用户互传", share: "用户互传", share_download: "接收文件", account: "账号状态",
+};
+const protocolTypes = {
+  info: "会话信息", ping: "心跳", list: "列出文件", put_begin: "上传受理",
+  put_chunk: "上传分块", put_finish: "上传校验", get_begin: "下载受理",
+  get_chunk: "下载分块", get_finish: "下载确认", share_send: "投递",
+  share_inbox: "读取收件箱", share_outbox: "读取发件箱",
 };
 const number = new Intl.NumberFormat("zh-CN", {maximumFractionDigits: 1});
 const utf8 = new TextEncoder();
@@ -55,6 +62,7 @@ let uploads = [];
 let managedAccount = null;
 let accountActionTrigger = null;
 let entry = {role: "main", name: ""};
+let protocolView;
 
 function node(tag, text, className) {
   const element = document.createElement(tag);
@@ -216,6 +224,8 @@ function clearViews() {
   sessionFilter = "all";
   updateSessionFilter();
   renderHistory();
+  protocolView = {data: null, session: null, lastPoll: 0, loading: false, rowKey: null};
+  renderProtocol();
   taskNodes.clear();
   for (const id of ["files", "tasks", "inbox", "admin-sessions", "admin-users", "admin-events", "monitor-events"]) {
     $(id).replaceChildren();
@@ -285,6 +295,7 @@ function showRoute(next) {
     refreshHistory();
   }
   if (route === "sharing") lastSharePoll = 0;
+  if (route === "protocol") refreshProtocol(true);
   refresh();
 }
 
@@ -914,6 +925,111 @@ function renderAdmin(data) {
   $("events-empty").hidden = events.length > 0;
 }
 
+function protocolBytes(value) {
+  return Number.isFinite(value) ? number.format(value) + " B" : "—";
+}
+
+function protocolPair(requestBytes, replyBytes) {
+  const pair = node("div");
+  for (const [direction, label, arrow, size] of [
+    ["request", "请求", "↑", requestBytes],
+    ["reply", "回包", "↓", replyBytes],
+  ]) {
+    const line = node("div", undefined, "protocol-pair");
+    line.dataset.direction = direction;
+    const marker = node("span", arrow);
+    marker.setAttribute("aria-label", label);
+    marker.title = label;
+    line.append(marker, node("span", protocolBytes(size), "mono"));
+    pair.append(line);
+  }
+  return pair;
+}
+
+function renderProtocol() {
+  const data = protocolView.data;
+  const sessions = [...(data?.sessions || [])].sort((a, b) => Date.parse(b.started) - Date.parse(a.started));
+  if (protocolView.session === null || (protocolView.session && !sessions.some(({id}) => id === protocolView.session))) {
+    protocolView.session = sessions[0]?.id || null;
+  }
+  const select = $("protocol-session");
+  replaceOptions(select, "全部会话", sessions.map(({id, user: owner}) => ({value: id, label: id + " · " + owner})));
+  select.value = protocolView.session || "";
+  select.disabled = !sessions.length;
+  const selected = sessions.find(({id}) => id === protocolView.session);
+  $("protocol-handshake").hidden = !selected;
+  $("protocol-session-empty").hidden = Boolean(selected);
+  $("protocol-session-empty").textContent = sessions.length
+    ? "选择会话以核对协商参数与证书指纹。"
+    : "等待文件客户端建立会话。";
+  if (selected) {
+    const ended = Date.parse(selected.ended) > 0;
+    $("protocol-identity").textContent = [selected.id, selected.user, roleName[selected.role]].filter(Boolean).join(" · ");
+    $("protocol-version").textContent = selected.version || "—";
+    $("protocol-cipher").textContent = selected.cipher || "—";
+    $("protocol-peer").textContent = selected.peer || "—";
+    $("protocol-client-fp").textContent = selected.client_fingerprint || "—";
+    $("protocol-server-fp").textContent = selected.server_fingerprint || "—";
+    $("protocol-connection-status").textContent = ended
+      ? "建立于 " + stamp(selected.started) + " · 关闭于 " + stamp(selected.ended)
+      : "建立于 " + stamp(selected.started) + " · 会话在线";
+  }
+  const exchanges = (data?.exchanges || []).filter((item) => !protocolView.session || item.session === protocolView.session);
+  $("protocol-count").textContent = data
+    ? exchanges.length + " 条记录 · ↑ 请求 · ↓ 回包 · 文件分块为抽样" +
+      (data.limit ? " · 最多留存 " + data.limit + " 条" : "")
+    : "等待服务端数据";
+  const rowKey = JSON.stringify(exchanges);
+  if (protocolView.rowKey === rowKey) return;
+  protocolView.rowKey = rowKey;
+  $("protocol-empty").hidden = exchanges.length > 0;
+  $("protocol-rows").replaceChildren(...exchanges.slice()
+    .sort((a, b) => Date.parse(b.time) - Date.parse(a.time))
+    .map((item) => {
+      const clock = node("time", stamp(item.time));
+      clock.dateTime = item.time || "";
+      const session = node("div", item.session || "—", "mono");
+      session.append(node("small", "ID " + (item.id ?? "—")));
+      const operation = node("div", protocolTypes[item.kind] || item.kind, "protocol-operation");
+      operation.append(node("small", item.kind, "mono protocol-operation-type"));
+      if (item.name) {
+        const file = node("small", item.name, "protocol-filename");
+        file.title = item.name;
+        operation.append(file);
+      }
+      const offset = node("span", item.has_offset
+        ? protocolBytes(item.offset) + " → " + protocolBytes(item.ack_offset)
+        : "—", "mono");
+      const result = node("div");
+      const status = node("span", item.ok ? "成功" : "拒绝", "pill");
+      status.dataset.variant = item.ok ? "on" : "off";
+      result.append(status);
+      if (Number.isFinite(item.elapsed_ms)) result.append(node("small", number.format(item.elapsed_ms) + " ms"));
+      return tableRow(clock, session, operation, protocolPair(item.request_header, item.reply_header),
+        protocolPair(item.request_payload, item.reply_payload), offset, result);
+    }));
+}
+
+async function refreshProtocol(force = false) {
+  if (user?.role !== "admin" || route !== "protocol") return;
+  const view = protocolView;
+  if (view.loading || (!force && Date.now() - view.lastPoll < 1450)) return;
+  view.lastPoll = Date.now();
+  view.loading = true;
+  try {
+    const data = await request("/api/admin/protocol");
+    if (view !== protocolView || route !== "protocol") return;
+    view.data = data;
+    renderProtocol();
+  } catch (error) {
+    if (view !== protocolView || route !== "protocol") return;
+    if (error.status === 401) showAuth("登录已失效，请重新登录。", "error");
+    else $("protocol-count").textContent = error.message;
+  } finally {
+    view.loading = false;
+  }
+}
+
 function accountDialogAction(account, mode, label, className) {
   const button = node("button", label, className);
   button.type = "button";
@@ -987,7 +1103,9 @@ formHandler("delete-member-account", async (data) => {
 }, "manage-account-notice");
 
 async function refresh() {
-  if (!user || polling === revision) return;
+  if (!user) return;
+  if (route === "protocol") refreshProtocol();
+  if (polling === revision) return;
   const current = revision;
   polling = current;
   try {
@@ -1106,6 +1224,11 @@ $("admission").addEventListener("click", async () => {
 });
 
 $("refresh-admin").addEventListener("click", refresh);
+$("protocol-refresh").addEventListener("click", () => refreshProtocol(true));
+$("protocol-session").addEventListener("change", (event) => {
+  protocolView.session = event.currentTarget.value;
+  renderProtocol();
+});
 $("monitor-audit").addEventListener("click", () => showRoute("audit"));
 for (const button of document.querySelectorAll("[data-monitor-range]")) {
   button.addEventListener("click", () => {

@@ -46,3 +46,23 @@ func TestLengthBoundsAndTruncation(t *testing.T) {
 		t.Fatal("truncated body accepted")
 	}
 }
+
+func TestMeasuredHeaderMatchesLengthPrefix(t *testing.T) {
+	var encoded bytes.Buffer
+	body := []byte("file content")
+	headerSize, err := WriteMeasured(&encoded, Frame{
+		Header: Header{ID: 8, Kind: "put_chunk", Offset: ChunkSize},
+		Body:   body,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := int(binary.BigEndian.Uint32(encoded.Bytes()[:4])); want != headerSize ||
+		encoded.Len() != 4+headerSize+len(body) {
+		t.Fatalf("reported %d header bytes, prefix specifies %d, frame is %d bytes", headerSize, want, encoded.Len())
+	}
+	frame, err := Read(splitReader{&encoded})
+	if err != nil || frame.HeaderBytes != headerSize || !bytes.Equal(frame.Body, body) {
+		t.Fatalf("decoded header %d, error %v", frame.HeaderBytes, err)
+	}
+}

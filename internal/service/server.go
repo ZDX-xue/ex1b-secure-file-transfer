@@ -86,28 +86,32 @@ type UserView struct {
 
 type activeSession struct {
 	SessionView
-	conn   net.Conn
-	cancel context.CancelFunc
+	conn      net.Conn
+	cancel    context.CancelFunc
+	traceSeen map[string]time.Time
 }
 
 type Server struct {
-	tls       *tls.Config
-	capacity  int
-	slots     chan struct{}
-	sequence  atomic.Uint64
-	accepting atomic.Bool
-	logger    *log.Logger
-	audit     io.WriteCloser
+	tls               *tls.Config
+	capacity          int
+	slots             chan struct{}
+	sequence          atomic.Uint64
+	accepting         atomic.Bool
+	logger            *log.Logger
+	audit             io.WriteCloser
+	serverFingerprint string
 
-	mu       sync.Mutex
-	address  string
-	accounts map[string]*account
-	byID     map[string]*account
-	sessions map[string]*activeSession
-	events   []Event
-	traffic  Traffic
-	shares   *shareStore
-	closed   bool
+	mu                sync.Mutex
+	address           string
+	accounts          map[string]*account
+	byID              map[string]*account
+	sessions          map[string]*activeSession
+	events            []Event
+	traffic           Traffic
+	shares            *shareStore
+	closed            bool
+	protocolSessions  []ProtocolSession
+	protocolExchanges []ProtocolExchange
 }
 
 func New(cfg identity.ServerConfig) (*Server, error) {
@@ -118,8 +122,9 @@ func New(cfg identity.ServerConfig) (*Server, error) {
 	s := &Server{
 		tls: secure, accounts: make(map[string]*account), capacity: cfg.MaxConnections,
 		slots: make(chan struct{}, cfg.MaxConnections), sessions: make(map[string]*activeSession),
-		byID:   make(map[string]*account),
-		logger: log.New(os.Stderr, "", 0),
+		byID:              make(map[string]*account),
+		logger:            log.New(os.Stderr, "", 0),
+		serverFingerprint: staticServerFingerprint(secure),
 	}
 	s.accepting.Store(true)
 	for _, user := range cfg.Users {
@@ -268,8 +273,9 @@ func (s *Server) handleSession(parent context.Context, raw net.Conn) {
 	id := fmt.Sprintf("S%04d", s.sequence.Add(1))
 	tlsState := conn.ConnectionState()
 	cert := tlsState.PeerCertificates[0]
+	fingerprint := identity.Fingerprint(cert)
 	s.mu.Lock()
-	user := s.accounts[identity.Fingerprint(cert)]
+	user := s.accounts[fingerprint]
 	if s.closed || user == nil || !user.enabled.Load() {
 		s.mu.Unlock()
 		s.record(Event{Action: "handshake", Status: "证书对应账号未启用"})
@@ -280,11 +286,17 @@ func (s *Server) handleSession(parent context.Context, raw net.Conn) {
 		conn:        raw, cancel: cancel,
 	}
 	s.sessions[id] = view
+	s.protocolSessions = appendBounded(s.protocolSessions, ProtocolSession{
+		ID: id, User: user.ID, Role: user.Role, Peer: view.Peer,
+		Version: tls.VersionName(tlsState.Version), Cipher: tls.CipherSuiteName(tlsState.CipherSuite),
+		ClientFingerprint: fingerprint, ServerFingerprint: s.serverFingerprint, Started: view.Since,
+	}, protocolSessionLimit)
 	s.mu.Unlock()
 	s.record(Event{User: user.ID, Session: id, Action: "connect", Status: "mTLS 已验证"})
 	defer func() {
 		s.mu.Lock()
 		delete(s.sessions, id)
+		s.endProtocolSession(id, time.Now())
 		s.mu.Unlock()
 		s.record(Event{User: user.ID, Session: id, Action: "disconnect", Status: "连接已关闭"})
 	}()
@@ -304,6 +316,7 @@ func (s *Server) handleSession(parent context.Context, raw net.Conn) {
 			}
 			return
 		}
+		readAt := time.Now()
 		select {
 		case jobSlots <- struct{}{}:
 			jobs.Go(func() {
@@ -325,12 +338,14 @@ func (s *Server) handleSession(parent context.Context, raw net.Conn) {
 					return
 				}
 				_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-				if err := wire.Write(conn, resp); err != nil {
+				headerBytes, err := wire.WriteMeasured(conn, resp)
+				if err != nil {
 					cancel()
 					return
 				}
 				s.mu.Lock()
 				view.Requests++
+				s.recordProtocolExchange(view, req, resp, headerBytes, readAt)
 				if req.Kind == "get_chunk" {
 					view.Sent += int64(len(resp.Body))
 					s.traffic.Sent += int64(len(resp.Body))

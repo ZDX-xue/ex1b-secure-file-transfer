@@ -62,6 +62,7 @@
         <button type="button" data-route="files" data-scope="member"><span aria-hidden="true">≡</span>文件与传输</button>
         <button type="button" data-route="sharing" data-scope="member"><span aria-hidden="true">⇆</span>用户互传</button>
         <button type="button" data-route="monitor" data-scope="admin"><span aria-hidden="true">▥</span>服务监控</button>
+        <button type="button" data-route="protocol" data-scope="admin"><span aria-hidden="true">⌁</span>协议追踪</button>
         <button type="button" data-route="accounts" data-scope="admin"><span aria-hidden="true">◎</span>账号管理</button>
         <button type="button" data-route="audit" data-scope="admin"><span aria-hidden="true">≔</span>操作记录</button>
         <button type="button" data-route="settings"><span aria-hidden="true">⚙</span>账号设置</button>
@@ -221,6 +222,44 @@
             <p class="empty" id="monitor-events-empty">暂无服务端记录。</p>
           </section>
         </div>
+      </section>
+
+      <section data-view="protocol" class="screen protocol-view" hidden>
+        <section class="card">
+          <div class="card-head">
+            <div><h2>会话与握手</h2><p>由文件服务端记录的实际 TLS 连接</p></div>
+            <div class="protocol-actions">
+              <label for="protocol-session">会话</label>
+              <select id="protocol-session"><option value="">全部会话</option></select>
+              <button id="protocol-refresh" class="secondary" type="button">刷新</button>
+            </div>
+          </div>
+          <div id="protocol-handshake" class="protocol-handshake" hidden>
+            <div class="protocol-connection">
+              <div><small>会话与账号</small><strong id="protocol-identity">—</strong></div>
+              <div><small>协商协议</small><strong id="protocol-version">—</strong></div>
+              <div><small>协商密码套件</small><strong id="protocol-cipher" class="mono">—</strong></div>
+              <div><small>客户端地址</small><strong id="protocol-peer" class="mono">—</strong></div>
+            </div>
+            <dl class="protocol-fingerprints">
+              <div><dt>客户端证书 SHA-256</dt><dd id="protocol-client-fp" class="mono">—</dd></div>
+              <div><dt>服务端证书 SHA-256</dt><dd id="protocol-server-fp" class="mono">—</dd></div>
+            </dl>
+            <p id="protocol-connection-status" class="protocol-connection-status"></p>
+          </div>
+          <p class="empty" id="protocol-session-empty">等待文件客户端建立会话。</p>
+        </section>
+        <section class="card">
+          <div class="card-head"><div><h2>请求与回包</h2><p id="protocol-count">等待服务端数据</p></div></div>
+          <div class="protocol-schema" aria-label="报文结构为四字节长度前缀，JSON 控制头，随后是数据块">
+            <span><b>4 B</b> 长度前缀</span><span>JSON 控制头</span><span>数据块</span>
+          </div>
+          <div class="table-scroll protocol-log" tabindex="0" aria-label="报文记录"><table class="protocol-table" aria-label="服务端应用层请求与回包">
+            <thead><tr><th scope="col">时间</th><th scope="col">会话与请求 ID</th><th scope="col">请求类型</th><th scope="col">JSON 头</th><th scope="col">载荷</th><th scope="col">偏移 → 确认</th><th scope="col">结果与耗时</th></tr></thead>
+            <tbody id="protocol-rows"></tbody>
+          </table></div>
+          <p class="empty" id="protocol-empty">等待文件客户端发送请求。</p>
+        </section>
       </section>
 
       <section data-view="accounts" class="screen" hidden>
