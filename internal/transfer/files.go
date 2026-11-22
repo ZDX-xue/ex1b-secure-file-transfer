@@ -95,6 +95,17 @@ func (e *Engine) Upload(ctx context.Context, name, sourcePath string, notify fun
 }
 
 func (e *Engine) Download(ctx context.Context, name, dir string, notify func(ui.Progress)) (string, error) {
+	return e.download(ctx, name, "", dir, notify)
+}
+
+func (e *Engine) DownloadShared(ctx context.Context, name, shareID, dir string, notify func(ui.Progress)) (string, error) {
+	if decoded, err := hex.DecodeString(shareID); err != nil || len(decoded) == 0 || len(decoded) > 32 {
+		return "", errors.New("中转文件编号无效")
+	}
+	return e.download(ctx, name, shareID, dir, notify)
+}
+
+func (e *Engine) download(ctx context.Context, name, shareID, dir string, notify func(ui.Progress)) (string, error) {
 	if err := storage.ValidateName(name); err != nil {
 		return "", err
 	}
@@ -110,14 +121,14 @@ func (e *Engine) Download(ctx context.Context, name, dir string, notify func(ui.
 	var meta wire.Frame
 	err = retry(ctx, func() error {
 		var err error
-		meta, err = e.call(ctx, wire.Header{Kind: "get_begin", Name: name}, nil)
+		meta, err = e.call(ctx, wire.Header{Kind: "get_begin", Name: name, ShareID: shareID}, nil)
 		return err
 	})
 	if err != nil {
 		return "", err
 	}
 	decoded, parseErr := hex.DecodeString(meta.SHA256)
-	if meta.Size < 0 || meta.Size > wire.MaxFile || parseErr != nil || len(decoded) != sha256.Size {
+	if meta.Name != name || meta.Size < 0 || meta.Size > wire.MaxFile || parseErr != nil || len(decoded) != sha256.Size {
 		return "", errors.New("服务端文件元数据无效")
 	}
 	result := filepath.Join(dir, name)
@@ -159,7 +170,7 @@ func (e *Engine) Download(ctx context.Context, name, dir string, notify func(ui.
 		for offset < meta.Size {
 			limit := int(min(meta.Size-offset, wire.ChunkSize))
 			r, err := link.call(ctx, wire.Frame{Header: wire.Header{
-				Kind: "get_chunk", Name: name, SHA256: meta.SHA256, Offset: offset, Limit: limit,
+				Kind: "get_chunk", Name: name, SHA256: meta.SHA256, Offset: offset, Limit: limit, ShareID: shareID,
 			}})
 			if err != nil {
 				return err
@@ -192,7 +203,7 @@ func (e *Engine) Download(ctx context.Context, name, dir string, notify func(ui.
 		return "", err
 	}
 	err = retry(ctx, func() error {
-		finish, err := e.call(ctx, wire.Header{Kind: "get_finish", Name: name, SHA256: digest, Size: size}, nil)
+		finish, err := e.call(ctx, wire.Header{Kind: "get_finish", Name: name, SHA256: digest, Size: size, ShareID: shareID}, nil)
 		if err == nil && !finish.Done {
 			return errors.New("服务端未确认下载回执")
 		}

@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,8 @@ type account struct {
 	identity.User
 	storage *storage.Store
 	rate    *limiter
+	enabled atomic.Bool
+	maxFile int64
 }
 
 type SessionView struct {
@@ -39,16 +42,20 @@ type SessionView struct {
 	Received int64     `json:"received"`
 	Sent     int64     `json:"sent"`
 	Requests uint64    `json:"requests"`
+	Incoming int       `json:"incoming"`
+	Outgoing int       `json:"outgoing"`
 }
 
 type Event struct {
-	Time    time.Time `json:"time"`
-	User    string    `json:"user"`
-	Session string    `json:"session"`
-	Action  string    `json:"action"`
-	Name    string    `json:"name,omitempty"`
-	Status  string    `json:"status"`
-	Offset  int64     `json:"offset,omitempty"`
+	Time      time.Time `json:"time"`
+	User      string    `json:"user"`
+	Session   string    `json:"session"`
+	Action    string    `json:"action"`
+	Name      string    `json:"name,omitempty"`
+	Status    string    `json:"status"`
+	Offset    int64     `json:"offset,omitempty"`
+	Recipient string    `json:"recipient,omitempty"`
+	ShareID   string    `json:"share_id,omitempty"`
 }
 
 type Snapshot struct {
@@ -58,19 +65,33 @@ type Snapshot struct {
 	Users     []UserView    `json:"users"`
 	Sessions  []SessionView `json:"sessions"`
 	Events    []Event       `json:"events"`
+	Traffic   Traffic       `json:"traffic"`
+}
+
+type Traffic struct {
+	Received int64 `json:"received"`
+	Sent     int64 `json:"sent"`
+	Incoming int   `json:"incoming"`
+	Outgoing int   `json:"outgoing"`
+	Shared   int   `json:"shared"`
 }
 
 type UserView struct {
-	ID    string `json:"id"`
-	Role  string `json:"role"`
-	Rate  int64  `json:"rate"`
-	Quota int64  `json:"quota"`
+	ID      string `json:"id"`
+	Role    string `json:"role"`
+	Rate    int64  `json:"rate"`
+	Quota   int64  `json:"quota"`
+	Enabled bool   `json:"enabled"`
+}
+
+type activeSession struct {
+	SessionView
+	conn   net.Conn
+	cancel context.CancelFunc
 }
 
 type Server struct {
 	tls       *tls.Config
-	accounts  map[string]*account
-	users     []UserView
 	capacity  int
 	slots     chan struct{}
 	sequence  atomic.Uint64
@@ -80,8 +101,13 @@ type Server struct {
 
 	mu       sync.Mutex
 	address  string
-	sessions map[string]*SessionView
+	accounts map[string]*account
+	byID     map[string]*account
+	sessions map[string]*activeSession
 	events   []Event
+	traffic  Traffic
+	shares   *shareStore
+	closed   bool
 }
 
 func New(cfg identity.ServerConfig) (*Server, error) {
@@ -91,18 +117,16 @@ func New(cfg identity.ServerConfig) (*Server, error) {
 	}
 	s := &Server{
 		tls: secure, accounts: make(map[string]*account), capacity: cfg.MaxConnections,
-		slots: make(chan struct{}, cfg.MaxConnections), sessions: make(map[string]*SessionView),
+		slots: make(chan struct{}, cfg.MaxConnections), sessions: make(map[string]*activeSession),
+		byID:   make(map[string]*account),
 		logger: log.New(os.Stderr, "", 0),
 	}
 	s.accepting.Store(true)
 	for _, user := range cfg.Users {
-		files, err := storage.Open(user.Root, cfg.MaxFileBytes, user.QuotaBytes)
-		if err != nil {
+		if err := s.AddUser(user, cfg.MaxFileBytes, true); err != nil {
 			s.Close()
 			return nil, fmt.Errorf("初始化 %s 的数据目录: %w", user.ID, err)
 		}
-		s.accounts[strings.ToLower(user.Fingerprint)] = &account{user, files, newLimiter(user.BytesPerSecond)}
-		s.users = append(s.users, UserView{user.ID, user.Role, user.BytesPerSecond, user.QuotaBytes})
 	}
 	if cfg.AuditFile != "" {
 		audit, err := os.OpenFile(cfg.AuditFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
@@ -117,6 +141,16 @@ func New(cfg identity.ServerConfig) (*Server, error) {
 }
 
 func (s *Server) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.closed = true
+	for _, session := range s.sessions {
+		session.cancel()
+		_ = session.conn.Close()
+	}
 	for _, user := range s.accounts {
 		_ = user.storage.Close()
 	}
@@ -130,11 +164,22 @@ func (s *Server) Snapshot() Snapshot {
 	defer s.mu.Unlock()
 	out := Snapshot{
 		Address: s.address, Accepting: s.accepting.Load(), Capacity: s.capacity,
-		Users: append([]UserView{}, s.users...), Sessions: make([]SessionView, 0, len(s.sessions)),
-		Events: append([]Event{}, s.events...),
+		Users: make([]UserView, 0, len(s.byID)), Sessions: make([]SessionView, 0, len(s.sessions)),
+		Events:  append([]Event{}, s.events...),
+		Traffic: s.traffic,
 	}
+	for _, account := range s.byID {
+		out.Users = append(out.Users, UserView{
+			ID: account.ID, Role: account.Role, Rate: account.BytesPerSecond,
+			Quota: account.QuotaBytes, Enabled: account.enabled.Load(),
+		})
+	}
+	sort.Slice(out.Users, func(i, j int) bool { return out.Users[i].ID < out.Users[j].ID })
 	for _, session := range s.sessions {
-		out.Sessions = append(out.Sessions, *session)
+		out.Sessions = append(out.Sessions, session.SessionView)
+	}
+	if s.shares != nil {
+		out.Traffic.Shared = s.shares.count()
 	}
 	return out
 }
@@ -212,16 +257,20 @@ func (s *Server) handleSession(parent context.Context, raw net.Conn) {
 		s.record(Event{Action: "handshake", Status: "拒绝或握手失败"})
 		return
 	}
+	id := fmt.Sprintf("S%04d", s.sequence.Add(1))
 	tlsState := conn.ConnectionState()
 	cert := tlsState.PeerCertificates[0]
+	s.mu.Lock()
 	user := s.accounts[identity.Fingerprint(cert)]
-	if user == nil {
-		s.record(Event{Action: "handshake", Status: "未登记的证书"})
+	if s.closed || user == nil || !user.enabled.Load() {
+		s.mu.Unlock()
+		s.record(Event{Action: "handshake", Status: "证书对应账号未启用"})
 		return
 	}
-	id := fmt.Sprintf("S%04d", s.sequence.Add(1))
-	view := &SessionView{ID: id, User: user.ID, Role: user.Role, Rate: user.BytesPerSecond, Peer: raw.RemoteAddr().String(), Since: time.Now()}
-	s.mu.Lock()
+	view := &activeSession{
+		SessionView: SessionView{ID: id, User: user.ID, Role: user.Role, Rate: user.BytesPerSecond, Peer: raw.RemoteAddr().String(), Since: time.Now()},
+		conn:        raw, cancel: cancel,
+	}
 	s.sessions[id] = view
 	s.mu.Unlock()
 	s.record(Event{User: user.ID, Session: id, Action: "connect", Status: "mTLS 已验证"})
@@ -251,7 +300,17 @@ func (s *Server) handleSession(parent context.Context, raw net.Conn) {
 		case jobSlots <- struct{}{}:
 			jobs.Go(func() {
 				defer func() { <-jobSlots }()
+				if req.Kind == "put_chunk" || req.Kind == "get_chunk" {
+					s.flow(view, req.Kind, 1)
+					defer s.flow(view, req.Kind, -1)
+				}
 				resp, countIn := s.run(ctx, user, id, req)
+				if countIn != 0 {
+					s.mu.Lock()
+					view.Received += countIn
+					s.traffic.Received += countIn
+					s.mu.Unlock()
+				}
 				writeMu.Lock()
 				defer writeMu.Unlock()
 				if ctx.Err() != nil {
@@ -264,9 +323,9 @@ func (s *Server) handleSession(parent context.Context, raw net.Conn) {
 				}
 				s.mu.Lock()
 				view.Requests++
-				view.Received += countIn
 				if req.Kind == "get_chunk" {
 					view.Sent += int64(len(resp.Body))
+					s.traffic.Sent += int64(len(resp.Body))
 				}
 				s.mu.Unlock()
 			})
@@ -277,11 +336,25 @@ func (s *Server) handleSession(parent context.Context, raw net.Conn) {
 	}
 }
 
+func (s *Server) flow(session *activeSession, kind string, delta int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if kind == "put_chunk" {
+		session.Incoming += delta
+		s.traffic.Incoming += delta
+	} else {
+		session.Outgoing += delta
+		s.traffic.Outgoing += delta
+	}
+}
+
 func (s *Server) run(ctx context.Context, user *account, session string, req wire.Frame) (wire.Frame, int64) {
 	reply := wire.Frame{Header: wire.Header{ID: req.ID, Kind: req.Kind + "_reply"}}
 	var err error
 	var received int64
-	if req.Kind != "put_chunk" && len(req.Body) != 0 {
+	if !user.enabled.Load() {
+		err = errors.New("账号已停用")
+	} else if req.Kind != "put_chunk" && len(req.Body) != 0 {
 		err = errors.New("此请求不接受数据块")
 	} else {
 		switch req.Kind {
@@ -313,29 +386,12 @@ func (s *Server) run(ctx context.Context, user *account, session string, req wir
 		case "put_finish":
 			err = user.storage.Finish(req.Name, req.Size, req.SHA256)
 			reply.Done = err == nil
-		case "get_begin":
-			var f storage.File
-			f, err = user.storage.Info(req.Name)
-			if err == nil {
-				reply.Size, reply.SHA256, reply.Name = f.Size, f.SHA256, f.Name
-			}
-		case "get_chunk":
-			if req.Limit <= 0 || req.Limit > wire.ChunkSize {
-				err = errors.New("下载分块大小无效")
-				break
-			}
-			reply.Body, err = user.storage.Read(req.Name, req.SHA256, req.Offset, req.Limit)
-			if err == nil {
-				err = user.rate.Wait(ctx, len(reply.Body))
-			}
-			reply.Offset = req.Offset + int64(len(reply.Body))
-		case "get_finish":
-			var f storage.File
-			f, err = user.storage.Info(req.Name)
-			if err == nil && (f.Size != req.Size || f.SHA256 != req.SHA256) {
-				err = errors.New("下载校验回执与文件版本不一致")
-			}
-			reply.Done = err == nil
+		case "get_begin", "get_chunk", "get_finish":
+			err = s.download(ctx, user, req, &reply)
+		case "share_send":
+			reply.ShareID, err = s.send(user, req.Recipient, req.Name, req.Message)
+		case "share_inbox", "share_outbox":
+			reply.Body, err = s.mailbox(user.ID, req.Kind == "share_outbox")
 		default:
 			err = errors.New("请求类型不受支持")
 			reply.Kind = "error_reply"
@@ -346,8 +402,11 @@ func (s *Server) run(ctx context.Context, user *account, session string, req wir
 		reply.Error = publicError(err)
 	}
 	switch req.Kind {
-	case "put_begin", "put_finish", "get_begin", "get_finish":
+	case "put_begin", "put_finish", "get_begin", "get_finish", "share_send":
 		name := req.Name
+		if reply.Name != "" {
+			name = reply.Name
+		}
 		if storage.ValidateName(name) != nil {
 			name = ""
 		}
@@ -355,7 +414,14 @@ func (s *Server) run(ctx context.Context, user *account, session string, req wir
 		if reply.Error != "" {
 			status = reply.Error
 		}
-		s.record(Event{User: user.ID, Session: session, Action: req.Kind, Name: name, Offset: reply.Offset, Status: status})
+		event := Event{User: user.ID, Session: session, Action: req.Kind, Name: name, Offset: reply.Offset, Status: status}
+		if reply.Error == "" {
+			event.ShareID = reply.ShareID
+			if req.Kind == "share_send" {
+				event.Recipient = req.Recipient
+			}
+		}
+		s.record(event)
 	}
 	return reply, received
 }

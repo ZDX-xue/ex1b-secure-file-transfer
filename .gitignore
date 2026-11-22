@@ -1,5 +1,7 @@
 /bin/
 /demo/
+/web-data/
+/.env
 *.log
 *.key
 *.exe

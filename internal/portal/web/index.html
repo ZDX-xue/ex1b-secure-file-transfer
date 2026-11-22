@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>安全文件传输</title>
+  <link href="/style.css" rel="stylesheet">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main id="auth" class="auth-shell">
+    <div class="auth-hero">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">⇄</span><span>安全文件传输</span></div>
+      <div class="hero-body">
+        <h1>安全文件传输<br>工作台</h1>
+        <p>在浏览器管理文件和传输任务，通过服务端与其他已验证账号互传。</p>
+        <div class="hero-flow" aria-label="发送方通过服务端把文件传给接收方">
+          <span>发送方</span><i aria-hidden="true">→</i><b>服务端</b><i aria-hidden="true">→</i><span>接收方</span>
+        </div>
+      </div>
+      <div class="hero-foot">《软件与系统安全》实验 1B</div>
+    </div>
+    <div class="auth-side">
+      <div class="auth-card">
+        <div class="segmented auth-toggle" aria-label="选择登录或者注册">
+          <button id="choose-login" type="button" aria-pressed="true">登录</button>
+          <button id="choose-register" type="button" aria-pressed="false">注册</button>
+        </div>
+        <h2 id="auth-title">登录工作台</h2>
+        <p id="auth-subtitle">使用账号进入你的文件与传输空间。</p>
+        <p id="auth-notice" role="status" class="inline-notice" hidden></p>
+        <form id="login-form" class="form">
+          <label>用户名<input id="login-name" name="username" autocomplete="username" placeholder="输入用户名" required></label>
+          <label>密码<input name="password" type="password" autocomplete="current-password" placeholder="输入密码" required></label>
+          <button class="primary" type="submit">登录</button>
+        </form>
+        <form id="register-form" class="form" hidden>
+          <label>用户名<input name="username" autocomplete="username" placeholder="例如 alice" pattern="[a-z][a-z0-9_\-]{2,31}" required><small>3–32 个小写字母、数字、下划线或连字符，字母开头。</small></label>
+          <label>密码<input name="password" type="password" autocomplete="new-password" placeholder="至少 10 个字符" minlength="10" maxlength="128" required></label>
+          <fieldset><legend>账号等级</legend>
+            <div class="role-choice">
+              <label><input type="radio" name="role" value="normal" checked><span><b>普通用户</b><small>256 KiB/s</small></span></label>
+              <label><input type="radio" name="role" value="vip"><span><b>VIP</b><small>1 MiB/s</small></span></label>
+            </div>
+          </fieldset>
+          <button class="primary" type="submit">创建账号</button>
+        </form>
+      </div>
+    </div>
+  </main>
+
+  <div id="workspace" class="app-shell" hidden>
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">⇄</span><span>安全文件传输</span></div>
+      <nav class="nav" aria-label="工作台导航">
+        <button type="button" data-route="files" data-scope="member"><span aria-hidden="true">≡</span>文件与传输</button>
+        <button type="button" data-route="sharing" data-scope="member"><span aria-hidden="true">⇆</span>用户互传</button>
+        <button type="button" data-route="monitor" data-scope="admin"><span aria-hidden="true">▥</span>服务监控</button>
+        <button type="button" data-route="accounts" data-scope="admin"><span aria-hidden="true">◎</span>账号管理</button>
+        <button type="button" data-route="audit" data-scope="admin"><span aria-hidden="true">≔</span>操作记录</button>
+        <button type="button" data-route="settings"><span aria-hidden="true">⚙</span>账号设置</button>
+      </nav>
+      <div class="side-foot">
+        <div class="identity"><span class="avatar" id="side-avatar" aria-hidden="true"></span><div><b id="side-user"></b><small id="side-role"></small></div></div>
+        <button id="logout" class="logout" type="button">退出登录</button>
+      </div>
+    </aside>
+    <main class="workspace-main">
+      <header class="workspace-head">
+        <div><h1 id="route-name"></h1><p id="route-description"></p></div>
+        <span id="global-state" class="status-chip" data-state="connecting" role="status"></span>
+      </header>
+      <p id="notice" class="inline-notice" role="status" hidden></p>
+
+      <section data-view="files" class="screen" hidden>
+        <div class="metrics compact-metrics">
+          <div class="metric"><span>传输会话</span><strong id="link-session" class="mono">—</strong></div>
+          <div class="metric"><span>账号带宽上限</span><strong id="link-rate">—</strong></div>
+          <div class="metric"><span>传输身份</span><strong id="link-tls">—</strong></div>
+          <div class="metric"><span>并行任务</span><strong id="running-count">0</strong></div>
+        </div>
+        <div class="work-columns">
+          <section class="card">
+            <div class="card-head"><div><h2>远端文件</h2><p id="file-count">0 个文件</p></div>
+              <button class="primary" id="upload" type="button">上传文件</button>
+              <input id="selected-files" type="file" multiple hidden>
+            </div>
+            <div class="table-scroll">
+              <table aria-label="远端文件列表"><thead><tr><th>文件名</th><th>大小</th><th class="end">操作</th></tr></thead><tbody id="files"></tbody></table>
+            </div>
+            <p class="empty" id="files-empty">上传文件后可在这里下载或发送给其他用户。</p>
+          </section>
+          <section class="card">
+            <div class="card-head"><div><h2>传输任务</h2><p>速率为短时采样，带宽按账号合计。</p></div><button class="secondary" id="reconnect" type="button">重连</button></div>
+            <div class="filter-segment segmented" aria-label="筛选传输任务">
+              <button type="button" data-filter="all" aria-pressed="true">全部</button>
+              <button type="button" data-filter="active" aria-pressed="false">进行中</button>
+              <button type="button" data-filter="done" aria-pressed="false">已完成</button>
+            </div>
+            <ul id="tasks" class="tasks" aria-label="传输任务"></ul>
+            <p class="empty" id="tasks-empty">暂无传输任务。</p>
+          </section>
+        </div>
+      </section>
+
+      <section data-view="sharing" class="screen" hidden>
+        <div class="work-columns share-columns">
+          <section class="card">
+            <div class="card-head"><div><h2>发送给用户</h2><p>文件与消息由服务端转交给指定账号。</p></div></div>
+            <form id="send-form" class="form inner-form">
+              <label>接收人<select name="recipient" id="recipients" required><option value="">选择接收人</option></select><small id="share-limit">文件接收带宽受发送方和接收方共同限制。</small></label>
+              <label>已上传文件<select name="name" id="send-files"><option value="">仅发送文字消息</option></select></label>
+              <label>留言<textarea id="send-message" name="message" rows="4" maxlength="512" aria-describedby="message-length" placeholder="输入消息，或给文件附上说明"></textarea><small id="message-length">0 / 512 字节</small></label>
+              <button class="primary" type="submit">发送</button>
+            </form>
+          </section>
+          <section class="card">
+            <div class="card-head"><div><h2>互传记录</h2><p id="inbox-count">0 条消息</p></div><button class="secondary" id="refresh-inbox" type="button">刷新</button></div>
+            <div class="filter-segment segmented" aria-label="选择互传记录">
+              <button type="button" data-mailbox="inbox" aria-pressed="true">收件箱</button>
+              <button type="button" data-mailbox="outbox" aria-pressed="false">已发送</button>
+            </div>
+            <ul class="inbox" id="inbox" aria-label="收到的消息和文件"></ul>
+            <p class="empty" id="inbox-empty">其他用户发来的消息和文件会显示在这里。</p>
+          </section>
+        </div>
+      </section>
+
+      <section data-view="monitor" class="screen" hidden>
+        <div class="metrics">
+          <div class="metric"><span>在线传输会话</span><strong id="admin-online">—</strong><small id="admin-capacity">—</small></div>
+          <div class="metric"><span>输入流 · 正在处理</span><strong id="admin-incoming">—</strong><small id="admin-received">—</small></div>
+          <div class="metric"><span>输出流 · 正在处理</span><strong id="admin-outgoing">—</strong><small id="admin-sent">—</small></div>
+          <div class="metric"><span>互传消息和文件</span><strong id="admin-shared">—</strong><small>服务端转交记录</small></div>
+        </div>
+        <section class="card monitor-card">
+          <div class="card-head"><div><h2>文件流量</h2><p id="admin-address">正在读取服务状态</p></div><button class="secondary" id="admission" type="button">暂停新连接</button></div>
+          <div class="chart-wrap">
+            <div class="chart-legend"><span><i class="incoming-dot"></i>输入</span><span><i class="outgoing-dot"></i>输出</span><span id="chart-last">等待数据</span></div>
+            <canvas id="traffic-chart" aria-label="最近一分钟输入和输出流量趋势" role="img"></canvas>
+          </div>
+        </section>
+        <section class="card">
+          <div class="card-head"><div><h2>活动会话</h2><p>已完成双向证书验证的文件传输连接。</p></div></div>
+          <div class="table-scroll"><table aria-label="活动会话"><thead><tr><th>会话编号</th><th>账号</th><th>客户端地址</th><th>接收</th><th>发送</th><th>请求</th></tr></thead><tbody id="admin-sessions"></tbody></table></div>
+          <p class="empty" id="sessions-empty">暂无活动会话。</p>
+        </section>
+      </section>
+
+      <section data-view="accounts" class="screen" hidden>
+        <section class="card">
+          <div class="card-head"><div><h2>已注册账号</h2><p id="member-count">0 个账号</p></div></div>
+          <div class="table-scroll"><table aria-label="已注册账号"><thead><tr><th>用户名</th><th>等级</th><th>带宽上限</th><th>状态</th><th class="end">操作</th></tr></thead><tbody id="admin-users"></tbody></table></div>
+        </section>
+      </section>
+
+      <section data-view="audit" class="screen" hidden>
+        <section class="card">
+          <div class="card-head"><div><h2>服务端操作记录</h2><p>连接、账号状态、文件校验和互传结果。</p></div><button id="refresh-admin" class="secondary" type="button">刷新</button></div>
+          <div class="table-scroll"><table aria-label="服务端操作记录"><thead><tr><th>时间</th><th>账号</th><th>会话</th><th>操作</th><th>对象</th><th>结果</th></tr></thead><tbody id="admin-events"></tbody></table></div>
+          <p class="empty" id="events-empty">暂无服务端记录。</p>
+        </section>
+      </section>
+
+      <section data-view="settings" class="screen" hidden>
+        <div class="work-columns settings-columns">
+          <section class="card">
+            <div class="card-head"><div><h2>账号资料</h2><p>当前登录身份及权限</p></div></div>
+            <dl class="definitions"><div><dt>用户名</dt><dd id="setting-user"></dd></div><div><dt>等级</dt><dd id="setting-role"></dd></div><div><dt>状态</dt><dd id="setting-enabled"></dd></div><div id="setting-rate-row"><dt>账号带宽上限</dt><dd id="setting-rate"></dd></div></dl>
+          </section>
+          <section class="card">
+            <div class="card-head"><div><h2>修改密码</h2><p>确认原密码后更新登录凭据。</p></div></div>
+            <form id="password-form" class="form inner-form">
+              <label>原密码<input type="password" name="current" autocomplete="current-password" required></label>
+              <label>新密码<input type="password" name="new_password" autocomplete="new-password" minlength="10" maxlength="128" required></label>
+              <button class="primary" type="submit">更新密码</button>
+            </form>
+          </section>
+        </div>
+        <section class="card" id="certificate-card">
+          <div class="card-head"><div><h2>传输连接与证书</h2><p>浏览器负责账号登录，实际文件由 Web 网关的文件客户端经双向 TLS 传给服务端。</p></div></div>
+          <dl class="definitions certs">
+            <div><dt>会话编号</dt><dd id="setting-session" class="mono">—</dd></div>
+            <div><dt>客户端证书 SHA-256</dt><dd id="setting-client-fp" class="mono">等待传输连接</dd></div>
+            <div><dt>服务端证书 SHA-256</dt><dd id="setting-server-fp" class="mono">等待传输连接</dd></div>
+          </dl>
+        </section>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

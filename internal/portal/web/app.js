@@ -1,0 +1,730 @@
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const roleName = {normal: "普通用户", vip: "VIP", admin: "管理员"};
+const roleRate = {normal: 256 * 1024, vip: 1024 * 1024};
+const routes = {
+  files: ["文件与传输", "在一条加密会话中管理文件、并行传输和断点续传。"],
+  sharing: ["用户互传", "通过服务端给已注册账号发送消息或文件。"],
+  monitor: ["服务监控", "查看验证会话、输入输出和最近一分钟的文件流量。"],
+  accounts: ["账号管理", "查看注册身份、带宽等级和接入状态。"],
+  audit: ["操作记录", "核对服务端记录的会话、文件与管理操作。"],
+  settings: ["账号设置", "查看账户信息、身份验证详情和更新密码。"],
+};
+const stateNames = {running: "传输中", pausing: "暂停中", paused: "已暂停", done: "校验通过", failed: "失败"};
+const active = new Set(["running", "pausing", "paused"]);
+const eventNames = {
+  connect: "建立连接", disconnect: "关闭连接", handshake: "验证证书",
+  put_begin: "开始上传", put_finish: "上传校验", get_begin: "开始下载",
+  get_finish: "下载校验", admission: "接入控制", frame: "报文检查", limit: "资源控制",
+  share_send: "用户互传", share: "用户互传", share_download: "接收文件", account: "账号状态",
+};
+const number = new Intl.NumberFormat("zh-CN", {maximumFractionDigits: 1});
+const utf8 = new TextEncoder();
+const taskNodes = new Map();
+let user = null;
+let csrf = "";
+let route = "files";
+let revision = 0;
+let polling;
+let taskState = [];
+let peopleState = [];
+let connected = false;
+let linkSession = "";
+let linkRate = 0;
+let filter = "all";
+let mailbox = "inbox";
+let fileKey = "";
+let inboxKey = "";
+let accountKey = "";
+let lastSharePoll = 0;
+let previousTraffic = null;
+let traffic = [];
+let accepting = true;
+let staging = 0;
+let uploads = [];
+
+function node(tag, text, className) {
+  const element = document.createElement(tag);
+  if (text !== undefined) element.textContent = text;
+  if (className) element.className = className;
+  return element;
+}
+
+function bytes(value) {
+  const units = ["B", "KiB", "MiB", "GiB"];
+  let amount = Math.max(0, Number(value) || 0);
+  let unit = 0;
+  while (amount >= 1024 && unit < units.length - 1) {
+    amount /= 1024;
+    unit++;
+  }
+  return number.format(amount) + " " + units[unit];
+}
+
+function stamp(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleTimeString("zh-CN", {hour12: false});
+}
+
+function notice(text, kind = "note", target = "notice") {
+  $(target).textContent = text;
+  $(target).dataset.kind = kind;
+  $(target).hidden = !text;
+}
+
+function markLink(value, text) {
+  $("global-state").dataset.state = value;
+  $("global-state").textContent = text;
+}
+
+class RequestError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function request(path, options = {}) {
+  const {method = "GET", data} = options;
+  const headers = {"Accept": "application/json"};
+  let body;
+  if (method !== "GET" && csrf) headers["X-CSRF-Token"] = csrf;
+  if (data instanceof FormData) {
+    body = data;
+  } else if (data !== undefined) {
+    headers["Content-Type"] = "application/json";
+    body = JSON.stringify(data);
+  }
+  const response = await fetch(path, {method, body, headers, cache: "no-store", credentials: "same-origin"});
+  const value = response.status === 204 ? {} : await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new RequestError(value.error || "请求失败（" + response.status + "）", response.status);
+  }
+  return value;
+}
+
+function post(path, data = {}) {
+  return request(path, {method: "POST", data});
+}
+
+function authMode(wantsRegister) {
+  $("choose-login").setAttribute("aria-pressed", String(!wantsRegister));
+  $("choose-register").setAttribute("aria-pressed", String(wantsRegister));
+  $("login-form").hidden = wantsRegister;
+  $("register-form").hidden = !wantsRegister;
+  $("auth-title").textContent = wantsRegister ? "创建账号" : "登录工作台";
+  $("auth-subtitle").textContent = wantsRegister ? "注册普通用户或 VIP 账号，获得独立的文件空间。" : "使用账号进入你的文件与传输空间。";
+  notice("", "note", "auth-notice");
+}
+
+function clearViews() {
+  taskState = [];
+  peopleState = [];
+  uploads = [];
+  fileKey = "";
+  inboxKey = "";
+  accountKey = "";
+  lastSharePoll = 0;
+  connected = false;
+  linkSession = "";
+  linkRate = 0;
+  filter = "all";
+  mailbox = "inbox";
+  previousTraffic = null;
+  traffic = [];
+  taskNodes.clear();
+  for (const id of ["files", "tasks", "inbox", "admin-sessions", "admin-users", "admin-events"]) {
+    $(id).replaceChildren();
+  }
+  replaceOptions($("recipients"), "选择接收人", []);
+  replaceOptions($("send-files"), "仅发送文字消息", []);
+  $("send-form").reset();
+  updateMessageLength();
+  for (const button of document.querySelectorAll("[data-filter]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.filter === "all"));
+  }
+  for (const button of document.querySelectorAll("[data-mailbox]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.mailbox === "inbox"));
+  }
+}
+
+function showAuth(message = "", kind = "note") {
+  revision++;
+  user = null;
+  csrf = "";
+  clearViews();
+  $("auth").hidden = false;
+  $("workspace").hidden = true;
+  authMode(false);
+  notice(message, kind, "auth-notice");
+}
+
+function openWorkspace(data) {
+  if (!data?.user?.username || !data.csrf) throw new Error("服务端未返回完整登录状态");
+  revision++;
+  clearViews();
+  user = data.user;
+  csrf = data.csrf;
+  $("auth").hidden = true;
+  $("workspace").hidden = false;
+  $("side-user").textContent = user.username;
+  $("side-role").textContent = roleName[user.role] || user.role;
+  $("side-avatar").textContent = user.username.slice(0, 1).toUpperCase();
+  $("setting-user").textContent = user.username;
+  $("setting-role").textContent = roleName[user.role] || user.role;
+  $("setting-enabled").textContent = user.enabled === false ? "停用" : "启用";
+  $("setting-rate-row").hidden = user.role === "admin";
+  $("certificate-card").hidden = user.role === "admin";
+  $("setting-rate").textContent = roleRate[user.role] ? bytes(roleRate[user.role]) + "/s" : "—";
+  markLink("connecting", "正在读取状态");
+  for (const link of document.querySelectorAll("[data-scope]")) {
+    link.hidden = link.dataset.scope !== (user.role === "admin" ? "admin" : "member");
+  }
+  showRoute(user.role === "admin" ? "monitor" : "files");
+}
+
+function showRoute(next) {
+  if (!user || !routes[next]) return;
+  route = next;
+  const [title, description] = routes[route];
+  $("route-name").textContent = title;
+  $("route-description").textContent = description;
+  $("route-name").tabIndex = -1;
+  for (const section of document.querySelectorAll("[data-view]")) section.hidden = section.dataset.view !== route;
+  for (const link of document.querySelectorAll("[data-route]")) {
+    if (link.dataset.route === route) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+  notice("");
+  if (route === "monitor") window.requestAnimationFrame(drawChart);
+  if (route === "sharing") lastSharePoll = 0;
+  refresh();
+}
+
+function formHandler(id, handle, target = "notice") {
+  $(id).addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    if (button.disabled) return;
+    button.disabled = true;
+    try {
+      await handle(Object.fromEntries(new FormData(form)), form);
+    } catch (error) {
+      showProblem(error, target);
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+function showProblem(error, target = "notice") {
+  if (user && error.status === 401) {
+    showAuth("登录已失效，请重新登录。", "error");
+    return;
+  }
+  notice(error.message || "请求失败，请稍后重试。", "error", target);
+}
+
+function action(label, handle, className = "secondary compact") {
+  const button = node("button", label, className);
+  button.type = "button";
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      await handle();
+    } catch (error) {
+      showProblem(error);
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+function cell(content) {
+  const el = node("td");
+  if (content instanceof Node) el.append(content);
+  else el.textContent = content ?? "—";
+  return el;
+}
+
+function tableRow(...values) {
+  const row = node("tr");
+  row.append(...values.map(cell));
+  return row;
+}
+
+function replaceOptions(select, placeholder, data) {
+  const previous = select.value;
+  const options = data.map(({value, label}) => new Option(label, value));
+  const current = [...select.options].map((item) => [item.value, item.label]);
+  const wanted = [["", placeholder], ...options.map((item) => [item.value, item.label])];
+  if (JSON.stringify(current) === JSON.stringify(wanted)) return;
+  select.replaceChildren(new Option(placeholder, ""), ...options);
+  if (options.some((item) => item.value === previous)) select.value = previous;
+}
+
+function renderConnection(status, problem) {
+  connected = Boolean(status) && !problem;
+  markLink(connected ? "online" : problem ? "offline" : "connecting", connected ? "传输会话在线" : problem ? "传输连接异常" : "正在连接");
+  linkSession = status?.session || "";
+  linkRate = status?.rate || 0;
+  $("link-session").textContent = linkSession || "—";
+  $("link-rate").textContent = status?.rate ? bytes(status.rate) + "/s" : "—";
+  if (status?.rate) $("setting-rate").textContent = bytes(status.rate) + "/s";
+  $("link-tls").textContent = status?.tls || "—";
+  $("setting-session").textContent = linkSession || "—";
+  $("setting-client-fp").textContent = status?.client_fingerprint || "等待传输连接";
+  $("setting-server-fp").textContent = status?.server_fingerprint || "等待传输连接";
+  $("upload").disabled = !connected;
+  const previousConnection = $("notice").dataset.kind === "connection";
+  if (problem && ($("notice").hidden || previousConnection)) notice(problem, "connection");
+  if (connected && previousConnection) notice("");
+}
+
+async function requestDownload(name, shareID) {
+  const selection = {name};
+  if (shareID) selection.share_id = shareID;
+  await post("/api/download", selection);
+  notice("已加入下载队列。");
+  refresh();
+}
+
+function renderFiles(files) {
+  const key = JSON.stringify([connected, files]);
+  if (key === fileKey) return;
+  fileKey = key;
+  $("file-count").textContent = files.length + " 个文件";
+  $("files-empty").hidden = files.length > 0;
+  $("files").replaceChildren(...files.map((file) => {
+    const name = node("div");
+    const title = node("b", file.name, "file-title");
+    title.title = file.name;
+    name.append(title);
+    if (file.sha256) {
+      const digest = node("small", "SHA-256 " + file.sha256.slice(0, 12) + "…", "mono digest");
+      digest.title = file.sha256;
+      name.append(digest);
+    }
+    const actions = node("div", undefined, "cell-actions");
+    const share = action("发送", async () => {
+      showRoute("sharing");
+      $("send-files").value = file.name;
+      $("recipients").focus();
+    }, "ghost compact");
+    const download = action("下载", () => requestDownload(file.name));
+    download.disabled = !connected;
+    share.disabled = !connected;
+    actions.append(share, download);
+    return tableRow(name, bytes(file.size), actions);
+  }));
+  replaceOptions($("send-files"), "仅发送文字消息", files.map((file) => ({value: file.name, label: file.name})));
+}
+
+function taskRow(task) {
+  let row = taskNodes.get(task.id);
+  if (!row) {
+    const item = node("li", undefined, "task");
+    const icon = node("span", task.direction === "upload" ? "↑" : "↓", "task-icon");
+    icon.dataset.kind = task.direction;
+    icon.title = task.direction === "upload" ? "上传" : "下载";
+    const body = node("div");
+    const top = node("div", undefined, "task-head");
+    const summary = node("div");
+    const name = node("b", task.name, "task-name");
+    const status = node("small", undefined, "task-state");
+    const buttons = node("div", undefined, "task-actions");
+    const progress = node("progress");
+    progress.max = 100;
+    progress.setAttribute("aria-label", task.name + " 的传输进度");
+    const measure = node("small");
+    const detail = node("small", undefined, "task-detail mono");
+    summary.append(name, status);
+    top.append(summary, buttons);
+    body.append(top, progress, measure, detail);
+    item.append(icon, body);
+    row = {item, status, buttons, progress, measure, detail, actionKey: ""};
+    taskNodes.set(task.id, row);
+  }
+  row.item.dataset.state = task.state;
+  row.status.textContent = stateNames[task.state] || task.state;
+  row.progress.value = task.state === "done" ? 100 : task.total ? Math.min(100, 100 * task.done / task.total) : 0;
+  row.measure.textContent = bytes(task.done) + " / " + bytes(task.total) + (task.rate ? " · " + bytes(task.rate) + "/s" : "");
+  const detail = [];
+  if (task.resumed_at > 0) detail.push("从 " + bytes(task.resumed_at) + " 续传");
+  if (task.state === "done" && task.sha256) detail.push("SHA-256 " + task.sha256.slice(0, 12) + "…");
+  if (task.error) detail.push(task.error);
+  row.detail.textContent = detail.join(" · ");
+  row.detail.title = task.sha256 || "";
+  const key = task.state + "/" + Boolean(task.saved);
+  if (row.actionKey !== key) {
+    row.actionKey = key;
+    row.buttons.replaceChildren();
+    if (task.state === "running") {
+      row.buttons.append(action("暂停", async () => {
+        await post("/api/tasks/" + task.id + "/pause");
+        refresh();
+      }));
+    }
+    if (task.state === "paused") {
+      row.buttons.append(action("继续", async () => {
+        await post("/api/tasks/" + task.id + "/resume");
+        refresh();
+      }));
+    }
+    if (task.state === "done" && task.saved) {
+      const link = node("a", "另存", "secondary compact");
+      link.href = "/api/files/" + task.id;
+      link.download = task.name;
+      row.buttons.append(link);
+    }
+  }
+  return row.item;
+}
+
+function renderTasks(tasks) {
+  taskState = tasks;
+  const activeIDs = new Set(tasks.map((task) => task.id));
+  for (const id of taskNodes.keys()) if (!activeIDs.has(id)) taskNodes.delete(id);
+  $("running-count").textContent = tasks.filter((task) => task.state === "running").length;
+  const rows = tasks.filter((task) => filter === "all" || (filter === "active" ? active.has(task.state) : task.state === "done")).map(taskRow);
+  const children = $("tasks").children;
+  if (rows.length !== children.length || rows.some((row, index) => row !== children[index])) {
+    $("tasks").replaceChildren(...rows);
+  }
+  $("tasks-empty").hidden = rows.length > 0;
+  $("tasks-empty").textContent = filter === "done" ? "暂无已完成的任务。" : filter === "active" ? "暂无进行中的任务。" : "暂无传输任务。";
+}
+
+function renderInbox(data, box) {
+  const key = JSON.stringify([box, data]);
+  if (key === inboxKey) return;
+  inboxKey = key;
+  $("inbox-count").textContent = data.length + " 条消息";
+  $("inbox-empty").textContent = box === "inbox" ? "其他用户发来的消息和文件会显示在这里。" : "你发送的消息和文件会显示在这里。";
+  $("inbox-empty").hidden = data.length > 0;
+  $("inbox").replaceChildren(...data.map((item) => {
+    const row = node("li", undefined, "inbox-row");
+    const meta = node("div", undefined, "inbox-head");
+    const label = box === "inbox" ? item.sender + " 发来" + (item.name ? "文件" : "消息") : "发送给 " + item.recipient;
+    meta.append(node("b", label), node("small", stamp(item.time)));
+    row.append(meta);
+    if (item.message) row.append(node("p", item.message));
+    if (item.name) {
+      const file = node("div", undefined, "inbox-file");
+      const details = node("div");
+      details.append(node("strong", item.name), node("small", bytes(item.size)));
+      file.append(details);
+      if (box === "inbox") {
+        file.append(action("接收文件", async () => {
+          await requestDownload(item.name, item.id);
+          showRoute("files");
+          notice("已加入下载队列。");
+        }));
+      }
+      row.append(file);
+    }
+    return row;
+  }));
+}
+
+async function refreshShare(current) {
+  lastSharePoll = Date.now();
+  const box = mailbox;
+  const [people, messages] = await Promise.all([request("/api/people"), request("/api/" + box)]);
+  if (current !== revision) return;
+  peopleState = people || [];
+  replaceOptions($("recipients"), "选择接收人", peopleState.map((person) => ({
+    value: person.username, label: person.username + " · " + (roleName[person.role] || person.role),
+  })));
+  renderShareLimit();
+  if (box === mailbox) renderInbox(messages || [], box);
+}
+
+function renderShareLimit() {
+  const recipient = peopleState.find((person) => person.username === $("recipients").value);
+  const recipientRate = roleRate[recipient?.role];
+  const rate = recipientRate && linkRate ? Math.min(recipientRate, linkRate) : 0;
+  $("share-limit").textContent = rate
+    ? "此方向文件接收上限 " + bytes(rate) + "/s，按双方较低档位计算。"
+    : "文件接收带宽受发送方和接收方共同限制。";
+}
+
+function updateMessageLength() {
+  const message = $("send-message");
+  const size = utf8.encode(message.value).length;
+  $("message-length").textContent = size + " / 512 字节";
+  message.setCustomValidity(size > 512 ? "留言不能超过 512 字节。" : "");
+}
+
+function drawChart() {
+  const canvas = $("traffic-chart");
+  if (route !== "monitor" || $("workspace").hidden) return;
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  if (!width || !height) return;
+  const dpi = window.devicePixelRatio || 1;
+  canvas.width = Math.round(width * dpi);
+  canvas.height = Math.round(height * dpi);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.scale(dpi, dpi);
+  const top = 14;
+  const base = height - 20;
+  const left = 4;
+  const right = width - 4;
+  const now = performance.now();
+  const max = Math.max(1, ...traffic.flatMap((sample) => [sample.input, sample.output]));
+  ctx.strokeStyle = "#e5edf0";
+  for (let i = 0; i <= 4; i++) {
+    const y = top + (base - top) * i / 4;
+    ctx.beginPath();
+    ctx.moveTo(left, y);
+    ctx.lineTo(right, y);
+    ctx.stroke();
+  }
+  for (const [direction, color] of [["input", "#177866"], ["output", "#466fa8"]]) {
+    ctx.beginPath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    traffic.forEach((sample, i) => {
+      const x = right - (right - left) * Math.max(0, now - sample.time) / 60000;
+      const y = base - (base - top) * sample[direction] / max;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+  ctx.fillStyle = "#65777e";
+  ctx.font = "11px sans-serif";
+  ctx.fillText("−60 秒", left, height - 3);
+  ctx.textAlign = "right";
+  ctx.fillText("现在", right, height - 3);
+}
+
+function updateTraffic(data) {
+  const {incoming = 0, outgoing = 0, received = 0, sent = 0, shared = 0} = data || {};
+  $("admin-incoming").textContent = incoming;
+  $("admin-received").textContent = "累计 " + bytes(received);
+  $("admin-outgoing").textContent = outgoing;
+  $("admin-sent").textContent = "累计 " + bytes(sent);
+  $("admin-shared").textContent = shared;
+  const time = performance.now();
+  if (!previousTraffic) {
+    previousTraffic = {received, sent, time};
+    $("chart-last").textContent = "等待流量采样";
+  } else if (time - previousTraffic.time >= 900) {
+    const seconds = (time - previousTraffic.time) / 1000;
+    const input = Math.max(0, (received - previousTraffic.received) / seconds);
+    const output = Math.max(0, (sent - previousTraffic.sent) / seconds);
+    previousTraffic = {received, sent, time};
+    traffic = [...traffic.filter((sample) => time - sample.time <= 60000), {input, output, time}];
+    $("chart-last").textContent = "输入 " + bytes(input) + "/s · 输出 " + bytes(output) + "/s";
+  }
+  drawChart();
+}
+
+function renderAdmin(data) {
+  accepting = Boolean(data.accepting);
+  markLink(accepting ? "online" : "offline", accepting ? "接受新连接" : "暂停新连接");
+  if ($("notice").dataset.kind === "connection") notice("");
+  const sessions = data.sessions || [];
+  const accounts = data.accounts || [];
+  const events = data.events || [];
+  $("admin-online").textContent = sessions.length;
+  $("admin-capacity").textContent = "连接容量 " + (data.capacity ?? "—");
+  $("admin-address").textContent = data.address ? "文件传输地址 " + data.address : "等待传输服务上线";
+  $("admission").textContent = accepting ? "暂停新连接" : "恢复接入";
+  updateTraffic(data.traffic);
+  $("admin-sessions").replaceChildren(...[...sessions].sort((a, b) => String(a.id).localeCompare(String(b.id))).map((session) =>
+    tableRow(node("span", session.id, "mono"), session.user, session.peer, bytes(session.received), bytes(session.sent), session.requests)));
+  $("sessions-empty").hidden = sessions.length > 0;
+  $("member-count").textContent = accounts.length + " 个账号";
+  const key = JSON.stringify([accounts, data.users]);
+  if (accountKey !== key) {
+    accountKey = key;
+    const realRates = new Map((data.users || []).map((entry) => [entry.id, entry.rate]));
+    $("admin-users").replaceChildren(...accounts.map((account) => {
+      const enabled = account.enabled !== false;
+      const pill = node("span", enabled ? "启用" : "停用", "pill");
+      pill.dataset.variant = enabled ? "on" : "off";
+      const actions = node("div", undefined, "cell-actions");
+      if (account.role !== "admin") {
+        actions.append(action(enabled ? "停用" : "启用", async () => {
+          if (enabled && !window.confirm("停用 " + account.username + " 后，该账号当前登录和传输会话会断开。")) return;
+          await post("/api/admin/users/" + encodeURIComponent(account.username) + "/state", {enabled: !enabled});
+          notice("账号状态已更新。");
+          refresh();
+        }, enabled ? "danger compact" : "secondary compact"));
+      }
+      const rate = realRates.get(account.username) || roleRate[account.role];
+      return tableRow(account.username, roleName[account.role] || account.role, rate ? bytes(rate) + "/s" : "—", pill, actions);
+    }));
+  }
+  $("admin-events").replaceChildren(...[...events].reverse().slice(0, 60).map((event) => {
+    const target = [event.name, event.recipient].filter(Boolean).join(" → ");
+    const result = (event.status || "—") + (event.offset ? " · 偏移 " + bytes(event.offset) : "");
+    return tableRow(stamp(event.time), event.user || "—", event.session || "—",
+      eventNames[event.action] || event.action, target || "—", result);
+  }));
+  $("events-empty").hidden = events.length > 0;
+}
+
+async function refresh() {
+  if (!user || polling === revision) return;
+  const current = revision;
+  polling = current;
+  try {
+    if (user.role === "admin") {
+      const state = await request("/api/admin/state");
+      if (current === revision) renderAdmin(state);
+    } else {
+      const state = await request("/api/state");
+      if (current !== revision) return;
+      renderConnection(state.status, state.problem || "");
+      renderFiles(state.files || []);
+      renderTasks(state.tasks || []);
+      if (route === "sharing" && Date.now() - lastSharePoll > 2400) {
+        await refreshShare(current);
+      }
+    }
+  } catch (error) {
+    if (current !== revision) return;
+    if (error.status === 401) showAuth("登录已失效，请重新登录。", "error");
+    else if ($("notice").hidden || $("notice").dataset.kind === "connection") notice(error.message, "connection");
+  } finally {
+    if (polling === current) polling = undefined;
+  }
+}
+
+function sendUploads() {
+  while (user && staging < 2 && uploads.length) {
+    const file = uploads.shift();
+    const current = revision;
+    const data = new FormData();
+    data.append("file", file, file.name);
+    staging++;
+    post("/api/upload", data)
+      .then(() => { if (current === revision) refresh(); })
+      .catch((error) => { if (current === revision) notice(file.name + " · " + error.message, "error"); })
+      .finally(() => { staging--; sendUploads(); });
+  }
+}
+
+$("choose-login").addEventListener("click", () => authMode(false));
+$("choose-register").addEventListener("click", () => authMode(true));
+for (const link of document.querySelectorAll("[data-route]")) {
+  link.addEventListener("click", () => showRoute(link.dataset.route));
+}
+
+formHandler("login-form", async (data, form) => {
+  const result = await post("/api/auth/login", data);
+  form.reset();
+  openWorkspace(result.user ? result : await request("/api/auth/me"));
+}, "auth-notice");
+
+formHandler("register-form", async (data, form) => {
+  await post("/api/auth/register", data);
+  form.reset();
+  authMode(false);
+  $("login-name").value = data.username;
+  notice("账号已创建，请登录。", "note", "auth-notice");
+  $("login-form").elements.password.focus();
+}, "auth-notice");
+
+formHandler("password-form", async (data, form) => {
+  await post("/api/auth/password", data);
+  form.reset();
+  showAuth("密码已更新，请用新密码登录。");
+});
+
+formHandler("send-form", async (data, form) => {
+  if (!data.name && !data.message.trim()) throw new Error("请选择文件或填写留言。");
+  await post("/api/share", data);
+  form.reset();
+  updateMessageLength();
+  renderShareLimit();
+  notice("已由服务端送达接收人的收件箱。");
+});
+
+$("logout").addEventListener("click", async () => {
+  try {
+    await post("/api/auth/logout");
+    showAuth("已退出登录。");
+  } catch (error) { showProblem(error); }
+});
+
+$("upload").addEventListener("click", () => $("selected-files").click());
+$("selected-files").addEventListener("change", () => {
+  const files = [...$("selected-files").files];
+  $("selected-files").value = "";
+  if (files.length + staging + uploads.length > 16) {
+    notice("本次最多选择 16 个文件。", "error");
+    return;
+  }
+  const valid = files.filter((file) => file.size <= 64 * 1024 * 1024);
+  if (valid.length !== files.length) notice("已略过大于 64 MiB 的文件。", "error");
+  uploads.push(...valid);
+  sendUploads();
+});
+
+$("reconnect").addEventListener("click", async () => {
+  $("reconnect").disabled = true;
+  try {
+    const before = linkSession;
+    await post("/api/reconnect");
+    notice(before ? "已请求重连，原会话 " + before + "。进行中的任务会尝试续传。" : "已请求连接。");
+    refresh();
+  } catch (error) { showProblem(error); }
+  finally { $("reconnect").disabled = false; }
+});
+
+$("admission").addEventListener("click", async () => {
+  $("admission").disabled = true;
+  try {
+    await post("/api/admin/admission", {accepting: !accepting});
+    notice("接入状态已更新，已有连接可继续传输。");
+    refresh();
+  } catch (error) { showProblem(error); }
+  finally { $("admission").disabled = false; }
+});
+
+$("refresh-admin").addEventListener("click", refresh);
+$("refresh-inbox").addEventListener("click", () => {
+  lastSharePoll = 0;
+  refresh();
+});
+$("recipients").addEventListener("change", renderShareLimit);
+$("send-message").addEventListener("input", updateMessageLength);
+for (const button of document.querySelectorAll("[data-mailbox]")) {
+  button.addEventListener("click", () => {
+    if (mailbox === button.dataset.mailbox) return;
+    mailbox = button.dataset.mailbox;
+    lastSharePoll = 0;
+    for (const candidate of document.querySelectorAll("[data-mailbox]")) {
+      candidate.setAttribute("aria-pressed", String(candidate === button));
+    }
+    $("inbox").replaceChildren();
+    $("inbox-empty").hidden = false;
+    $("inbox-empty").textContent = "正在读取互传记录…";
+    refresh();
+  });
+}
+for (const button of document.querySelectorAll("[data-filter]")) {
+  button.addEventListener("click", () => {
+    filter = button.dataset.filter;
+    for (const candidate of document.querySelectorAll("[data-filter]")) {
+      candidate.setAttribute("aria-pressed", String(candidate === button));
+    }
+    renderTasks(taskState);
+  });
+}
+
+window.addEventListener("resize", drawChart);
+request("/api/auth/me").then(openWorkspace).catch((error) => {
+  if (error.status !== 401) notice(error.message, "error", "auth-notice");
+});
+setInterval(refresh, 800);

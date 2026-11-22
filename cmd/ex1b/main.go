@@ -15,6 +15,7 @@ import (
 	"ex1b/internal/service"
 	"ex1b/internal/transfer"
 	"ex1b/internal/ui"
+	"ex1b/internal/webapp"
 )
 
 func main() {
@@ -28,10 +29,23 @@ func main() {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("用法: ex1b init | server | client | version")
+		return errors.New("用法: ex1b web | init | server | client | version")
 	}
 	options := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	switch args[0] {
+	case "web":
+		var web webapp.Options
+		options.StringVar(&web.Listen, "listen", "127.0.0.1:4443", "Web 监听地址")
+		options.StringVar(&web.Origin, "origin", "https://localhost:4443", "浏览器访问地址，亦用于证书和同源校验")
+		options.StringVar(&web.Data, "data", "web-data", "Web 账号、文件与 PKI 数据目录")
+		options.StringVar(&web.AdminPasswordFile, "admin-password-file", "", "首次初始化管理员密码的文件")
+		if err := options.Parse(args[1:]); err != nil {
+			return err
+		}
+		web.Ready = func(origin, caFile, passFile string) {
+			fmt.Printf("EX1B Web  %s\n实验 CA  %s\n首次管理员 admin 的密码文件  %s\n", origin, caFile, passFile)
+		}
+		return webapp.Run(ctx, web)
 	case "init":
 		dir := options.String("dir", "demo", "演示配置和数据目录")
 		listen := options.String("listen", "127.0.0.1:43951", "文件传输服务地址")
@@ -78,7 +92,7 @@ func run(ctx context.Context, args []string) error {
 	case "version":
 		fmt.Println("EX1B 1.0 · TLS file transfer")
 	default:
-		return fmt.Errorf("未知命令 %q，请使用 init、server 或 client", args[0])
+		return fmt.Errorf("未知命令 %q，请使用 web、init、server 或 client", args[0])
 	}
 	return nil
 }

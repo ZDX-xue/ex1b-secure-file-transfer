@@ -184,8 +184,52 @@ func (e *Engine) call(ctx context.Context, header wire.Header, body []byte) (wir
 }
 
 func (e *Engine) Info(ctx context.Context) (ui.Status, error) {
-	r, err := e.call(ctx, wire.Header{Kind: "info"}, nil)
-	return ui.Status{User: r.User, Role: r.Role, Session: r.Session, Rate: r.Rate, TLS: r.TLS}, err
+	link, err := e.ensure(ctx)
+	if err != nil {
+		return ui.Status{}, err
+	}
+	r, err := link.call(ctx, wire.Frame{Header: wire.Header{Kind: "info"}})
+	if err != nil {
+		return ui.Status{}, err
+	}
+	state := link.conn.ConnectionState()
+	return ui.Status{
+		User: r.User, Role: r.Role, Session: r.Session, Rate: r.Rate, TLS: r.TLS,
+		ServerFingerprint: identity.Fingerprint(state.VerifiedChains[0][0]),
+		ClientFingerprint: identity.Fingerprint(e.tls.Certificates[0].Leaf),
+	}, nil
+}
+
+type Share struct {
+	ID        string    `json:"id"`
+	Sender    string    `json:"sender"`
+	Recipient string    `json:"recipient"`
+	Name      string    `json:"name,omitempty"`
+	Size      int64     `json:"size,omitempty"`
+	SHA256    string    `json:"sha256,omitempty"`
+	Message   string    `json:"message,omitempty"`
+	Time      time.Time `json:"time"`
+}
+
+func (e *Engine) Send(ctx context.Context, recipient, name, message string) (string, error) {
+	reply, err := e.call(ctx, wire.Header{Kind: "share_send", Recipient: recipient, Name: name, Message: message}, nil)
+	return reply.ShareID, err
+}
+
+func (e *Engine) Shares(ctx context.Context, outbox bool) ([]Share, error) {
+	kind := "share_inbox"
+	if outbox {
+		kind = "share_outbox"
+	}
+	reply, err := e.call(ctx, wire.Header{Kind: kind}, nil)
+	if err != nil {
+		return nil, err
+	}
+	result := []Share{}
+	if err := json.Unmarshal(reply.Body, &result); err != nil {
+		return nil, errors.New("服务端中转列表格式无效")
+	}
+	return result, nil
 }
 
 func (e *Engine) List(ctx context.Context) ([]ui.File, error) {

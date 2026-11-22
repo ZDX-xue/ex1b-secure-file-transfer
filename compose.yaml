@@ -1,0 +1,20 @@
+name: ex1b-web
+services:
+  transfer:
+    build: .
+    command: ["--origin", "${EX1B_ORIGIN:-https://localhost:4443}"]
+    ports:
+      - "${EX1B_BIND_IP:-127.0.0.1}:4443:4443"
+    volumes:
+      - transfer-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
+
+volumes:
+  transfer-data:

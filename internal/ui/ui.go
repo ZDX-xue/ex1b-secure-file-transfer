@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	maxFileSize = 128 << 20
+	maxFileSize = 64 << 20
 	maxActive   = 16
 	maxRows     = 64
 	maxStaging  = 4
@@ -44,11 +44,13 @@ type Engine interface {
 }
 
 type Status struct {
-	User    string `json:"user"`
-	Role    string `json:"role"`
-	Session string `json:"session"`
-	Rate    int64  `json:"rate"`
-	TLS     string `json:"tls"`
+	User              string `json:"user"`
+	Role              string `json:"role"`
+	Session           string `json:"session"`
+	Rate              int64  `json:"rate"`
+	TLS               string `json:"tls"`
+	ServerFingerprint string `json:"server_fingerprint,omitempty"`
+	ClientFingerprint string `json:"client_fingerprint,omitempty"`
 }
 
 type File struct {
@@ -78,6 +80,7 @@ type taskView struct {
 type task struct {
 	view       taskView
 	sourcePath string
+	shareID    string
 	savedPath  string
 	cancel     context.CancelFunc
 	lastBytes  int64
@@ -109,6 +112,45 @@ type app struct {
 	tasks  []*task
 	remote snapshot
 	update chan struct{}
+}
+
+// NewWorkspace runs the transfer queue behind a caller-authenticated gateway.
+// The gateway is responsible for session authentication, Host and CSRF checks.
+func NewWorkspace(ctx context.Context, downloads string, engine Engine) (http.Handler, func(), error) {
+	dir, err := filepath.Abs(downloads)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, nil, err
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	stage, err := os.MkdirTemp(dir, ".ex1b-uploads-")
+	if err != nil {
+		root.Close()
+		return nil, nil, err
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	a := &app{engine: engine, ctx: runCtx, stage: stage, saved: dir, root: root, update: make(chan struct{}, 1)}
+	a.work.Add(1)
+	go a.refresh()
+	var once sync.Once
+	closeWorkspace := func() {
+		once.Do(func() {
+			a.mu.Lock()
+			a.closed = true
+			a.mu.Unlock()
+			cancel()
+			engine.Drop()
+			a.work.Wait()
+			_ = root.Close()
+			_ = os.RemoveAll(stage)
+		})
+	}
+	return a.routes(), closeWorkspace, nil
 }
 
 // Serve starts a local-only browser interface with a capability for mutations.
@@ -217,11 +259,11 @@ func (a *app) routes() http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
-		if r.Host != a.host {
+		if a.host != "" && r.Host != a.host {
 			failure(w, http.StatusForbidden, "只接受本机界面地址")
 			return
 		}
-		if r.Method == http.MethodPost && (r.Header.Get("Origin") != a.origin ||
+		if a.host != "" && r.Method == http.MethodPost && (r.Header.Get("Origin") != a.origin ||
 			subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Client-Token")), []byte(a.token)) != 1) {
 			failure(w, http.StatusForbidden, "操作来源未通过验证，请在本机界面中重试")
 			return
@@ -339,7 +381,7 @@ func (a *app) upload(w http.ResponseWriter, r *http.Request) {
 	size, writeErr := io.Copy(file, io.LimitReader(part, maxFileSize+1))
 	closeErr := file.Close()
 	if size > maxFileSize {
-		failure(w, http.StatusRequestEntityTooLarge, "单个上传文件上限为 128 MiB")
+		failure(w, http.StatusRequestEntityTooLarge, "单个上传文件上限为 64 MiB")
 		return
 	}
 	if writeErr != nil || closeErr != nil {
@@ -379,15 +421,16 @@ func (a *app) releaseStaging() {
 
 func (a *app) download(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Name string `json:"name"`
+		Name    string `json:"name"`
+		ShareID string `json:"share_id,omitempty"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil || !validName(request.Name) || decoder.Decode(new(any)) != io.EOF {
+	if err := decoder.Decode(&request); err != nil || !validName(request.Name) || len(request.ShareID) > 64 || decoder.Decode(new(any)) != io.EOF {
 		failure(w, http.StatusBadRequest, "文件名无效")
 		return
 	}
-	id, err := a.enqueue(request.Name, "download", "", 0)
+	id, err := a.enqueueTransfer(request.Name, "download", "", request.ShareID, 0)
 	if err != nil {
 		failure(w, http.StatusConflict, err.Error())
 		return
@@ -407,6 +450,10 @@ func (a *app) active() int {
 }
 
 func (a *app) enqueue(name, direction, source string, size int64) (uint64, error) {
+	return a.enqueueTransfer(name, direction, source, "", size)
+}
+
+func (a *app) enqueueTransfer(name, direction, source, shareID string, size int64) (uint64, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.closed || a.active() >= maxActive {
@@ -430,6 +477,7 @@ func (a *app) enqueue(name, direction, source string, size int64) (uint64, error
 	transfer := &task{
 		view:       taskView{ID: a.seq, Name: name, Direction: direction, Progress: Progress{Total: size}},
 		sourcePath: source,
+		shareID:    shareID,
 	}
 	a.tasks = append(a.tasks, transfer)
 	a.start(transfer)
@@ -445,7 +493,7 @@ func (a *app) start(transfer *task) {
 	transfer.view.Rate = 0
 	transfer.lastSample = time.Now()
 	transfer.lastBytes = transfer.view.Done
-	name, direction, source := transfer.view.Name, transfer.view.Direction, transfer.sourcePath
+	name, direction, source, shareID := transfer.view.Name, transfer.view.Direction, transfer.sourcePath, transfer.shareID
 	a.work.Add(1)
 	go func() {
 		defer a.work.Done()
@@ -455,6 +503,15 @@ func (a *app) start(transfer *task) {
 		progress := func(p Progress) { a.progress(transfer, p) }
 		if direction == "upload" {
 			err = a.engine.Upload(ctx, name, source, progress)
+		} else if shareID != "" {
+			receiver, ok := a.engine.(interface {
+				DownloadShared(context.Context, string, string, string, func(Progress)) (string, error)
+			})
+			if ok {
+				saved, err = receiver.DownloadShared(ctx, name, shareID, a.saved, progress)
+			} else {
+				err = errors.New("此客户端没有中转下载功能")
+			}
 		} else {
 			saved, err = a.engine.Download(ctx, name, a.saved, progress)
 		}

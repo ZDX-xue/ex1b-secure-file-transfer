@@ -18,22 +18,25 @@ const (
 )
 
 type Header struct {
-	Version int    `json:"version"`
-	ID      uint64 `json:"id"`
-	Kind    string `json:"kind"`
-	BodyLen int    `json:"body_len"`
-	Name    string `json:"name,omitempty"`
-	SHA256  string `json:"sha256,omitempty"`
-	Size    int64  `json:"size,omitempty"`
-	Offset  int64  `json:"offset,omitempty"`
-	Limit   int    `json:"limit,omitempty"`
-	Done    bool   `json:"done,omitempty"`
-	Error   string `json:"error,omitempty"`
-	User    string `json:"user,omitempty"`
-	Role    string `json:"role,omitempty"`
-	Session string `json:"session,omitempty"`
-	Rate    int64  `json:"rate,omitempty"`
-	TLS     string `json:"tls,omitempty"`
+	Version   int    `json:"version"`
+	ID        uint64 `json:"id"`
+	Kind      string `json:"kind"`
+	BodyLen   int    `json:"body_len"`
+	Name      string `json:"name,omitempty"`
+	SHA256    string `json:"sha256,omitempty"`
+	Size      int64  `json:"size,omitempty"`
+	Offset    int64  `json:"offset,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+	Done      bool   `json:"done,omitempty"`
+	Error     string `json:"error,omitempty"`
+	User      string `json:"user,omitempty"`
+	Role      string `json:"role,omitempty"`
+	Session   string `json:"session,omitempty"`
+	Rate      int64  `json:"rate,omitempty"`
+	TLS       string `json:"tls,omitempty"`
+	Recipient string `json:"recipient,omitempty"`
+	ShareID   string `json:"share_id,omitempty"`
+	Message   string `json:"message,omitempty"`
 }
 
 type Frame struct {
